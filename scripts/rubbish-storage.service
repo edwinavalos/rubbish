@@ -1,0 +1,16 @@
+[Unit]
+Description=Rubbish device mapper thin pool setup
+Documentation=https://github.com/edwinavalos/rubbish
+After=local-fs.target
+Before=rubbish.service
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/rubbish-setup-storage
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

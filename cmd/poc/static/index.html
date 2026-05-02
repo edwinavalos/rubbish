@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>rubbish</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    /* ── Color tokens (dark default) ── */
+    :root {
+      --bg:              #0f0f0f;
+      --surface:         #111111;
+      --surface-input:   #0f0f0f;
+      --border:          #1e1e1e;
+      --border-strong:   #2a2a2a;
+      --text-primary:    #e0e0e0;
+      --text-secondary:  #d1d5db;
+      --text-muted:      #9ca3af;
+      --text-dim:        #6b7280;
+      --text-dimmer:     #4b5563;
+      --text-placeholder:#374151;
+      --text-empty:      #333333;
+      --text-heading:    #f3f4f6;
+      --modal-backdrop:  rgba(0,0,0,0.72);
+      --accent:          #7c3aed;
+      --accent-hover:    #6d28d9;
+      --status-ready:    #22c55e;
+      --status-starting: #facc15;
+      --status-failed:   #ef4444;
+    }
+
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg:              #f3f4f6;
+        --surface:         #ffffff;
+        --surface-input:   #f9fafb;
+        --border:          #e5e7eb;
+        --border-strong:   #d1d5db;
+        --text-primary:    #111827;
+        --text-secondary:  #374151;
+        --text-muted:      #6b7280;
+        --text-dim:        #9ca3af;
+        --text-dimmer:     #9ca3af;
+        --text-placeholder:#d1d5db;
+        --text-empty:      #d1d5db;
+        --text-heading:    #111827;
+        --modal-backdrop:  rgba(0,0,0,0.45);
+        --accent:          #7c3aed;
+        --accent-hover:    #6d28d9;
+        --status-ready:    #16a34a;
+        --status-starting: #d97706;
+        --status-failed:   #dc2626;
+      }
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text-primary);
+      font-family: 'Menlo', 'Monaco', 'Consolas', monospace;
+      font-size: 14px;
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 24px;
+      height: 52px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+    }
+    .logo {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--accent);
+      letter-spacing: -0.5px;
+    }
+    .btn-new {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      padding: 6px 14px;
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .btn-new:hover { background: var(--accent-hover); }
+
+    /* ── Main ── */
+    main {
+      max-width: 860px;
+      margin: 32px auto;
+      padding: 0 24px;
+    }
+    .section-title {
+      font-size: 12px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 16px;
+    }
+
+    /* ── Session cards ── */
+    .sessions-list { display: flex; flex-direction: column; gap: 8px; }
+
+    .session-card {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 16px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--surface);
+    }
+    .session-card.dimmed { opacity: 0.45; }
+
+    .status-dot {
+      flex-shrink: 0;
+      font-size: 12px;
+      width: 14px;
+      text-align: center;
+    }
+    .status-dot.ready    { color: var(--status-ready); }
+    .status-dot.starting { color: var(--status-starting); animation: pulse 1.2s ease-in-out infinite; }
+    .status-dot.failed   { color: var(--status-failed); }
+    .status-dot.stopped  { color: var(--status-failed); }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+
+    .session-id {
+      flex-shrink: 0;
+      color: var(--text-muted);
+      font-size: 12px;
+      width: 90px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .session-repo {
+      flex: 1;
+      overflow: hidden;
+      min-width: 0;
+    }
+    .session-repo-name {
+      color: var(--text-secondary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .session-repo-branch {
+      font-size: 11px;
+      color: var(--text-dim);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .session-repo-branch .branch-tag {
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .session-status {
+      flex-shrink: 0;
+      width: 76px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-dim);
+    }
+    .session-status.ready    { color: var(--status-ready); }
+    .session-status.starting { color: var(--status-starting); }
+    .session-status.failed   { color: var(--status-failed); }
+    .session-age {
+      flex-shrink: 0;
+      font-size: 11px;
+      color: var(--text-dimmer);
+      width: 52px;
+      text-align: right;
+    }
+    .session-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+    .btn-open {
+      background: transparent;
+      color: var(--accent);
+      border: 1px solid var(--accent);
+      padding: 3px 10px;
+      border-radius: 3px;
+      font-family: inherit;
+      font-size: 12px;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-block;
+    }
+    .btn-open:hover { background: var(--accent); color: #fff; }
+
+    .btn-dismiss {
+      background: transparent;
+      color: var(--text-dimmer);
+      border: 1px solid var(--border);
+      padding: 3px 8px;
+      border-radius: 3px;
+      font-family: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .btn-dismiss:hover { color: var(--status-failed); border-color: var(--status-failed); }
+
+    .empty-state {
+      color: var(--text-empty);
+      font-size: 13px;
+      padding: 40px 0;
+      text-align: center;
+    }
+
+    /* ── Modal ── */
+    .modal-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: var(--modal-backdrop);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-backdrop.open { display: flex; }
+
+    .modal {
+      background: var(--surface);
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      padding: 28px;
+      width: 440px;
+      max-width: calc(100vw - 32px);
+    }
+    .modal h2 {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 20px;
+      color: var(--text-heading);
+    }
+    .field { margin-bottom: 16px; }
+    .field label {
+      display: block;
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .field input {
+      width: 100%;
+      background: var(--surface-input);
+      border: 1px solid var(--border-strong);
+      color: var(--text-primary);
+      padding: 8px 10px;
+      border-radius: 3px;
+      font-family: inherit;
+      font-size: 13px;
+      outline: none;
+    }
+    .field input:focus { border-color: var(--accent); }
+    .field input::placeholder { color: var(--text-placeholder); }
+    .field-hint {
+      font-size: 11px;
+      color: var(--text-dimmer);
+      margin-top: 5px;
+    }
+
+    .modal-status {
+      font-size: 12px;
+      color: var(--status-starting);
+      min-height: 20px;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .modal-error { color: var(--status-failed); }
+
+    .spinner {
+      width: 12px;
+      height: 12px;
+      border: 2px solid var(--status-starting);
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      display: none;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 4px;
+    }
+    .btn-cancel {
+      background: transparent;
+      color: var(--text-dim);
+      border: 1px solid var(--border-strong);
+      padding: 7px 16px;
+      border-radius: 3px;
+      font-family: inherit;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .btn-cancel:hover { color: var(--text-primary); border-color: var(--text-muted); }
+    .btn-launch {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      padding: 7px 16px;
+      border-radius: 3px;
+      font-family: inherit;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .btn-launch:hover:not(:disabled) { background: var(--accent-hover); }
+    .btn-launch:disabled { opacity: 0.5; cursor: default; }
+  </style>
+</head>
+<body>
+
+<header>
+  <span class="logo">rubbish</span>
+  <button class="btn-new" id="btnNew">+ New Session</button>
+</header>
+
+<main>
+  <div class="section-title" id="sectionTitle">Sessions</div>
+  <div class="sessions-list" id="sessionsList">
+    <div class="empty-state">No active sessions.</div>
+  </div>
+</main>
+
+<!-- New Session Modal -->
+<div class="modal-backdrop" id="modalBackdrop">
+  <div class="modal">
+    <h2>New Session</h2>
+    <div class="field">
+      <label>Repo URL <span style="color:var(--text-dimmer)">(optional)</span></label>
+      <input type="url" id="inputRepo" placeholder="https://github.com/user/repo">
+    </div>
+    <div class="field">
+      <label>Branch / Worktree <span style="color:var(--text-dimmer)">(optional)</span></label>
+      <input type="text" id="inputBranch" placeholder="main">
+      <div class="field-hint">Leave blank to clone the default branch.</div>
+    </div>
+    <div class="field">
+      <label>GitHub Token <span style="color:var(--text-dimmer)">(optional)</span></label>
+      <input type="password" id="inputToken" placeholder="ghp_...">
+      <div class="field-hint" id="tokenHint">Token is saved server-side and auto-fills on next session.</div>
+    </div>
+    <div class="modal-status" id="modalStatus">
+      <span class="spinner" id="spinner"></span>
+      <span id="statusText"></span>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-cancel" id="btnCancel">Cancel</button>
+      <button class="btn-launch" id="btnLaunch">Launch Session</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const $ = id => document.getElementById(id);
+
+  // ── Session list polling ──────────────────────────────────────────────────
+
+  let pollTimer = null;
+  let launchingId = null;
+
+  function startPolling() {
+    loadSessions();
+    pollTimer = setInterval(loadSessions, 2000);
+  }
+
+  async function loadSessions() {
+    try {
+      const res = await fetch('/api/sessions');
+      if (!res.ok) return;
+      const sessions = await res.json();
+      renderSessions(sessions);
+
+      if (launchingId) {
+        const s = sessions.find(s => s.id === launchingId);
+        if (s && s.status === 'ready') {
+          onLaunchReady(s);
+        } else if (s && (s.status === 'failed' || s.status === 'stopped')) {
+          onLaunchFailed(s.error || 'Session failed to start.');
+        }
+      }
+    } catch (e) { /* network error, will retry */ }
+  }
+
+  function timeAgo(isoStr) {
+    if (!isoStr) return '';
+    const diff = Math.floor((Date.now() - new Date(isoStr)) / 1000);
+    if (diff < 60)  return `${diff}s ago`;
+    if (diff < 3600) return `${Math.floor(diff/60)}m ago`;
+    return `${Math.floor(diff/3600)}h ago`;
+  }
+
+  function repoDisplay(url) {
+    if (!url) return null;
+    const m = url.match(/github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/);
+    if (m) return m[1];
+    return url.replace(/^https?:\/\//, '');
+  }
+
+  function truncate(str, max) {
+    if (!str) return '—';
+    return str.length > max ? str.slice(0, max) + '…' : str;
+  }
+
+  function renderSessions(sessions) {
+    const list = $('sessionsList');
+    const active = sessions.filter(s => s.status !== 'stopped' && s.status !== 'failed');
+    const count = active.length;
+
+    $('sectionTitle').textContent = count === 1
+      ? 'Sessions (1 active)'
+      : `Sessions (${count} active)`;
+
+    if (sessions.length === 0) {
+      list.innerHTML = '<div class="empty-state">No active sessions. Launch one to get started.</div>';
+      return;
+    }
+
+    list.innerHTML = sessions.map(s => {
+      const isTerminal = s.status === 'stopped' || s.status === 'failed';
+      const dotChar = s.status === 'ready' ? '●' : s.status === 'starting' ? '○' : '✕';
+      const shortId = s.id.split('-')[0];
+      const actions = s.status === 'ready'
+        ? `<a class="btn-open" href="/terminal/${s.id}">Open</a>
+           <button class="btn-dismiss" data-id="${s.id}" onclick="dismissSession('${s.id}')">✕</button>`
+        : `<button class="btn-dismiss" data-id="${s.id}" onclick="dismissSession('${s.id}')">✕</button>`;
+
+      const repo = repoDisplay(s.repo_url);
+      const repoHtml = repo
+        ? `<div class="session-repo-name" title="${s.repo_url}">${truncate(repo, 40)}</div>
+           <div class="session-repo-branch">${s.branch ? `<span class="branch-tag">⎇ ${s.branch}</span>` : '<span style="color:var(--text-placeholder)">default branch</span>'}</div>`
+        : `<div class="session-repo-name" style="color:var(--text-placeholder)">no repo</div>`;
+
+      return `
+        <div class="session-card ${isTerminal ? 'dimmed' : ''}">
+          <span class="status-dot ${s.status}">${dotChar}</span>
+          <span class="session-id" title="${s.id}">${shortId}</span>
+          <div class="session-repo">${repoHtml}</div>
+          <span class="session-status ${s.status}">${s.status}</span>
+          <span class="session-age">${timeAgo(s.created_at)}</span>
+          <span class="session-actions">${actions}</span>
+        </div>`;
+    }).join('');
+  }
+
+  async function dismissSession(id) {
+    try {
+      await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
+    } catch (e) { /* ignore */ }
+    await loadSessions();
+  }
+
+  // ── Modal ─────────────────────────────────────────────────────────────────
+
+  async function openModal() {
+    $('inputRepo').value = '';
+    $('inputBranch').value = '';
+    $('inputToken').value = '';
+    $('tokenHint').textContent = 'Token is saved server-side and auto-fills on next session.';
+    $('tokenHint').style.color = '';
+    setModalStatus('', false);
+    $('btnLaunch').disabled = false;
+    $('modalBackdrop').classList.add('open');
+    $('inputRepo').focus();
+
+    try {
+      const res = await fetch('/api/saved-token');
+      if (res.ok) {
+        const { has_token } = await res.json();
+        if (has_token) {
+          $('tokenHint').textContent = '✓ Saved token available — leave blank to use it, or paste a new one to replace it.';
+          $('tokenHint').style.color = 'var(--status-ready)';
+        }
+      }
+    } catch (e) { /* non-fatal */ }
+  }
+
+  function closeModal() {
+    launchingId = null;
+    $('modalBackdrop').classList.remove('open');
+    $('btnLaunch').disabled = false;
+    setModalStatus('', false);
+    loadSessions();
+  }
+
+  function setModalStatus(msg, loading, isError) {
+    $('statusText').textContent = msg;
+    $('statusText').className = isError ? 'modal-error' : '';
+    $('spinner').style.display = loading ? 'block' : 'none';
+  }
+
+  async function launchSession() {
+    const repoUrl     = $('inputRepo').value.trim();
+    const branch      = $('inputBranch').value.trim();
+    const githubToken = $('inputToken').value.trim();
+
+    $('btnLaunch').disabled = true;
+    setModalStatus('Starting VM…', true);
+
+    try {
+      const res = await fetch('/api/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repo_url: repoUrl || null, branch: branch || null, github_token: githubToken || null }),
+      });
+
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(body || `HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+      launchingId = data.id;
+      setModalStatus('Starting VM…', true);
+    } catch (e) {
+      setModalStatus(e.message, false, true);
+      $('btnLaunch').disabled = false;
+    }
+  }
+
+  function onLaunchReady(session) {
+    launchingId = null;
+    setModalStatus('', false);
+    $('modalBackdrop').classList.remove('open');
+    loadSessions();
+    location.href = `/terminal/${session.id}`;
+  }
+
+  function onLaunchFailed(msg) {
+    launchingId = null;
+    setModalStatus(msg, false, true);
+    $('btnLaunch').disabled = false;
+  }
+
+  // ── Event listeners ───────────────────────────────────────────────────────
+
+  $('btnNew').addEventListener('click', openModal);
+  $('btnCancel').addEventListener('click', closeModal);
+  $('btnLaunch').addEventListener('click', launchSession);
+
+  $('modalBackdrop').addEventListener('click', e => {
+    if (e.target === $('modalBackdrop')) closeModal();
+  });
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeModal();
+  });
+
+  // ── Init ──────────────────────────────────────────────────────────────────
+  startPolling();
+</script>
+</body>
+</html>

@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package rubbish.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/edwinavalos/rubbish/gen/rubbish/v1;rubbishv1";
+
+service AuthService {
+  rpc Login(LoginRequest) returns (LoginResponse);
+  rpc Logout(LogoutRequest) returns (LogoutResponse);
+  rpc CreateAPIKey(CreateAPIKeyRequest) returns (CreateAPIKeyResponse);
+  rpc ListAPIKeys(ListAPIKeysRequest) returns (ListAPIKeysResponse);
+  rpc RevokeAPIKey(RevokeAPIKeyRequest) returns (RevokeAPIKeyResponse);
+  rpc CreateTeam(CreateTeamRequest) returns (CreateTeamResponse);
+  rpc AddTeamMember(AddTeamMemberRequest) returns (AddTeamMemberResponse);
+  rpc RemoveTeamMember(RemoveTeamMemberRequest) returns (RemoveTeamMemberResponse);
+}
+
+message LoginRequest {
+  string username = 1;
+  string password = 2;
+}
+
+message LoginResponse {
+  string token = 1;
+  google.protobuf.Timestamp expires_at = 2;
+}
+
+message LogoutRequest {}
+
+message LogoutResponse {}
+
+message CreateAPIKeyRequest {
+  string name = 1;
+  int32 expires_in_days = 2;
+}
+
+message CreateAPIKeyResponse {
+  string key_id = 1;
+  string key = 2;
+  string name = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+message ListAPIKeysRequest {}
+
+message ListAPIKeysResponse {
+  repeated APIKey keys = 1;
+}
+
+message APIKey {
+  string id = 1;
+  string name = 2;
+  google.protobuf.Timestamp created_at = 3;
+  google.protobuf.Timestamp last_used_at = 4;
+  google.protobuf.Timestamp expires_at = 5;
+}
+
+message RevokeAPIKeyRequest {
+  string key_id = 1;
+}
+
+message RevokeAPIKeyResponse {}
+
+message CreateTeamRequest {
+  string name = 1;
+  string slug = 2;
+}
+
+message CreateTeamResponse {
+  Team team = 1;
+}
+
+message Team {
+  string id = 1;
+  string slug = 2;
+  string name = 3;
+  google.protobuf.Timestamp created_at = 4;
+}
+
+message AddTeamMemberRequest {
+  string team_slug = 1;
+  string user_slug = 2;
+}
+
+message AddTeamMemberResponse {}
+
+message RemoveTeamMemberRequest {
+  string team_slug = 1;
+  string user_slug = 2;
+}
+
+message RemoveTeamMemberResponse {}

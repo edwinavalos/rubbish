@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package rubbish.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/edwinavalos/rubbish/gen/rubbish/v1;rubbishv1";
+
+service ImageService {
+  rpc ListImages(ListImagesRequest) returns (ListImagesResponse);
+  rpc GetImage(GetImageRequest) returns (Image);
+  rpc ImportImage(ImportImageRequest) returns (stream ImportImageProgress);
+  rpc DeleteImage(DeleteImageRequest) returns (DeleteImageResponse);
+  rpc SetDefaultImage(SetDefaultImageRequest) returns (SetDefaultImageResponse);
+}
+
+message Image {
+  string id = 1;
+  string name = 2;
+  string version = 3;
+  repeated string tags = 4;
+  bool is_default = 5;
+  google.protobuf.Timestamp imported_at = 6;
+  map<string, string> provider_refs = 7;
+}
+
+message ListImagesRequest {}
+
+message ListImagesResponse {
+  repeated Image images = 1;
+}
+
+message GetImageRequest {
+  string image_id = 1;
+}
+
+message ImportImageRequest {
+  string name = 1;
+  string version = 2;
+  string source_path = 3;
+  repeated string tags = 4;
+}
+
+message ImportImageProgress {
+  string phase = 1;
+  int64 bytes_written = 2;
+  int64 total_bytes = 3;
+  bool done = 4;
+  string error = 5;
+}
+
+message DeleteImageRequest {
+  string image_id = 1;
+}
+
+message DeleteImageResponse {}
+
+message SetDefaultImageRequest {
+  string image_id = 1;
+}
+
+message SetDefaultImageResponse {}

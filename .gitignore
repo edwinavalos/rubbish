@@ -1,0 +1,10 @@
+# Compiled binaries
+/rubbish-poc
+/poc
+/rubbishd
+
+# Generated protobuf (committed separately if desired)
+# gen/
+
+# OS
+.DS_Store

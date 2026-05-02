@@ -1,0 +1,12 @@
+version: v2
+modules:
+  - path: proto
+    name: buf.build/edwinavalos/rubbish
+deps:
+  - buf.build/googleapis/googleapis
+breaking:
+  use:
+    - FILE
+lint:
+  use:
+    - DEFAULT

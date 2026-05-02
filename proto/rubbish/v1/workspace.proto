@@ -1,0 +1,123 @@
+syntax = "proto3";
+
+package rubbish.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/edwinavalos/rubbish/gen/rubbish/v1;rubbishv1";
+
+service WorkspaceService {
+  rpc EnsureRepo(EnsureRepoRequest) returns (EnsureRepoResponse);
+  rpc ListRepos(ListReposRequest) returns (ListReposResponse);
+  rpc DeleteRepo(DeleteRepoRequest) returns (DeleteRepoResponse);
+
+  rpc CreateWorktree(CreateWorktreeRequest) returns (CreateWorktreeResponse);
+  rpc ListWorktrees(ListWorktreesRequest) returns (ListWorktreesResponse);
+  rpc DeleteWorktree(DeleteWorktreeRequest) returns (DeleteWorktreeResponse);
+
+  rpc FetchRepo(FetchRepoRequest) returns (FetchRepoResponse);
+
+  rpc SetRetentionPolicy(SetRetentionPolicyRequest) returns (SetRetentionPolicyResponse);
+  rpc ListExpiredWorktrees(ListExpiredWorktreesRequest) returns (ListExpiredWorktreesResponse);
+}
+
+message Repo {
+  string id = 1;
+  string team_slug = 2;
+  string user_slug = 3;
+  string url = 4;
+  string path = 5;
+  google.protobuf.Timestamp cloned_at = 6;
+}
+
+message Worktree {
+  string id = 1;
+  string team_slug = 2;
+  string user_slug = 3;
+  string repo_url = 4;
+  string branch = 5;
+  string path = 6;
+  google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp last_shutdown_at = 8;
+}
+
+message EnsureRepoRequest {
+  string team_slug = 1;
+  string user_slug = 2;
+  string repo_url = 3;
+}
+
+message EnsureRepoResponse {
+  Repo repo = 1;
+  bool cloned = 2;
+}
+
+message ListReposRequest {
+  string team_slug = 1;
+  string user_slug = 2;
+}
+
+message ListReposResponse {
+  repeated Repo repos = 1;
+}
+
+message DeleteRepoRequest {
+  string team_slug = 1;
+  string user_slug = 2;
+  string repo_url = 3;
+}
+
+message DeleteRepoResponse {}
+
+message CreateWorktreeRequest {
+  string team_slug = 1;
+  string user_slug = 2;
+  string repo_url = 3;
+  string branch = 4;
+}
+
+message CreateWorktreeResponse {
+  Worktree worktree = 1;
+}
+
+message ListWorktreesRequest {
+  string team_slug = 1;
+  string user_slug = 2;
+  string repo_url = 3;
+}
+
+message ListWorktreesResponse {
+  repeated Worktree worktrees = 1;
+}
+
+message DeleteWorktreeRequest {
+  string team_slug = 1;
+  string user_slug = 2;
+  string repo_url = 3;
+  string branch = 4;
+}
+
+message DeleteWorktreeResponse {}
+
+message FetchRepoRequest {
+  string team_slug = 1;
+  string user_slug = 2;
+  string repo_url = 3;
+}
+
+message FetchRepoResponse {
+  int32 commits_fetched = 1;
+}
+
+message SetRetentionPolicyRequest {
+  string team_slug = 1;
+  int32 retention_days = 2;
+}
+
+message SetRetentionPolicyResponse {}
+
+message ListExpiredWorktreesRequest {}
+
+message ListExpiredWorktreesResponse {
+  repeated Worktree worktrees = 1;
+}
