@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 	fc "github.com/edwinavalos/rubbish/internal/compute/firecracker"
+	"github.com/edwinavalos/rubbish/internal/session"
 	"github.com/edwinavalos/rubbish/internal/terminal"
 	"github.com/edwinavalos/rubbish/internal/vm"
 	"golang.org/x/crypto/ssh"
@@ -28,20 +30,92 @@ var indexHTML []byte
 //go:embed static/terminal.html
 var terminalHTML []byte
 
+// ---- Interfaces for testability ---------------------------------------------
+
+type snapshotter interface {
+	CreateSnapshot(id string) (string, error)
+	DeleteSnapshot(id string) error
+	InjectNetworkConfig(device, ip, gateway string) error
+}
+
+type vmLauncher interface {
+	Launch(ctx context.Context, slot int, rootfsPath string) (vmHandle, error)
+}
+
+type vmHandle interface {
+	WaitForSSH(ctx context.Context) error
+	Stop(ctx context.Context) error
+}
+
+type bridgeFactory interface {
+	NewBridge(addr string, signer ssh.Signer) setupRunner
+}
+
+type setupRunner interface {
+	RunSetup(cmds []string) error
+}
+
+// ---- Real adapters ----------------------------------------------------------
+
+type realSnapshotter struct{ m *fc.SnapshotManager }
+
+func (r *realSnapshotter) CreateSnapshot(id string) (string, error) { return r.m.CreateSnapshot(id) }
+func (r *realSnapshotter) DeleteSnapshot(id string) error           { return r.m.DeleteSnapshot(id) }
+func (r *realSnapshotter) InjectNetworkConfig(device, ip, gateway string) error {
+	return vm.InjectNetworkConfig(device, ip, gateway)
+}
+
+type realVMLauncher struct{}
+
+func (realVMLauncher) Launch(ctx context.Context, slot int, rootfsPath string) (vmHandle, error) {
+	return vm.Launch(ctx, slot, rootfsPath)
+}
+
+type realBridgeFactory struct{ signer ssh.Signer }
+
+func (r *realBridgeFactory) NewBridge(addr string, _ ssh.Signer) setupRunner {
+	return terminal.NewBridge(addr, r.signer)
+}
+
 // ---- Session ----------------------------------------------------------------
 
 type Session struct {
 	ID        string    `json:"id"`
 	Slot      int       `json:"slot"`
-	Status    string    `json:"status"` // starting | ready | failed | stopped
 	RepoURL   string    `json:"repo_url"`
 	Branch    string    `json:"branch,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	Error     string    `json:"error,omitempty"`
 
-	v      *vm.VM
-	bridge *terminal.Bridge
+	sm     *session.StateMachine
+	v      vmHandle
+	bridge setupRunner
 	cancel context.CancelFunc
+}
+
+// SessionStatus returns the current lifecycle state.
+func (s *Session) SessionStatus() session.State { return s.sm.State() }
+
+// MarshalJSON emits the JSON shape the frontend expects, with "status" from the state machine.
+func (s *Session) MarshalJSON() ([]byte, error) {
+	type wire struct {
+		ID        string        `json:"id"`
+		Slot      int           `json:"slot"`
+		Status    session.State `json:"status"`
+		RepoURL   string        `json:"repo_url"`
+		Branch    string        `json:"branch,omitempty"`
+		CreatedAt time.Time     `json:"created_at"`
+		Error     string        `json:"error,omitempty"`
+	}
+	return json.Marshal(wire{
+		ID:        s.ID,
+		Slot:      s.Slot,
+		Status:    s.sm.State(),
+		RepoURL:   s.RepoURL,
+		Branch:    s.Branch,
+		CreatedAt: s.CreatedAt,
+		Error:     s.Error,
+	})
 }
 
 // ---- SessionManager ---------------------------------------------------------
@@ -50,15 +124,29 @@ type SessionManager struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
 	slots    [vm.MaxSlots]bool
-	snapMgr  *fc.SnapshotManager
+	snap     snapshotter
+	launcher vmLauncher
+	bridges  bridgeFactory
 	signer   ssh.Signer
 	credPath string
 }
 
 func NewSessionManager(snapMgr *fc.SnapshotManager, signer ssh.Signer, credPath string) *SessionManager {
+	return newSessionManager(
+		&realSnapshotter{snapMgr},
+		realVMLauncher{},
+		&realBridgeFactory{signer},
+		signer,
+		credPath,
+	)
+}
+
+func newSessionManager(snap snapshotter, launcher vmLauncher, bridges bridgeFactory, signer ssh.Signer, credPath string) *SessionManager {
 	return &SessionManager{
 		sessions: make(map[string]*Session),
-		snapMgr:  snapMgr,
+		snap:     snap,
+		launcher: launcher,
+		bridges:  bridges,
 		signer:   signer,
 		credPath: credPath,
 	}
@@ -80,8 +168,8 @@ func (m *SessionManager) freeSlot(slot int) {
 	m.mu.Unlock()
 }
 
-// Create allocates a slot and starts a VM in the background. Returns immediately
-// with status "starting".
+// Create allocates a slot and starts a VM in the background.
+// Returns immediately with status "provisioning".
 func (m *SessionManager) Create(parentCtx context.Context, repoURL, branch, githubToken string) (*Session, error) {
 	m.mu.Lock()
 	slot, ok := m.allocSlot()
@@ -92,14 +180,20 @@ func (m *SessionManager) Create(parentCtx context.Context, repoURL, branch, gith
 
 	id := uuid.New().String()
 	ctx, cancel := context.WithCancel(parentCtx)
+
+	sm := session.New(session.StateProvisioning)
+	sm.OnTransition(func(from, to session.State, elapsed time.Duration) {
+		log.Printf("[session %s] %s → %s (%.2fs)", id[:8], from, to, elapsed.Seconds())
+	})
+
 	sess := &Session{
 		ID:        id,
 		Slot:      slot,
-		Status:    "starting",
 		RepoURL:   repoURL,
 		Branch:    branch,
 		CreatedAt: time.Now(),
 		cancel:    cancel,
+		sm:        sm,
 	}
 	m.sessions[id] = sess
 	m.mu.Unlock()
@@ -110,50 +204,66 @@ func (m *SessionManager) Create(parentCtx context.Context, repoURL, branch, gith
 
 func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken string) {
 	fail := func(err error) {
+		sess.sm.Transition(session.StateFailed) //nolint:errcheck
 		m.mu.Lock()
-		sess.Status = "failed"
 		sess.Error = err.Error()
 		m.slots[sess.Slot] = false
 		m.mu.Unlock()
-		fmt.Printf("[session %s] failed: %v\n", sess.ID[:8], err)
+		log.Printf("[session %s] failed: %v", sess.ID[:8], err)
 	}
 
-	// 1. Snapshot
-	device, err := m.snapMgr.CreateSnapshot(sess.ID)
+	// 1. Create snapshot (Provisioning state)
+	device, err := m.snap.CreateSnapshot(sess.ID)
 	if err != nil {
 		fail(fmt.Errorf("create snapshot: %w", err))
 		return
 	}
 
-	// 2. Inject per-slot network config
-	if err := vm.InjectNetworkConfig(device, vm.SlotIP(sess.Slot), "172.16.0.1"); err != nil {
-		m.snapMgr.DeleteSnapshot(sess.ID) //nolint:errcheck
+	// 2. Inject network config (still Provisioning)
+	if err := m.snap.InjectNetworkConfig(device, vm.SlotIP(sess.Slot), "172.16.0.1"); err != nil {
+		m.snap.DeleteSnapshot(sess.ID) //nolint:errcheck
 		fail(fmt.Errorf("inject network: %w", err))
 		return
 	}
 
-	// 3. Boot VM
-	v, err := vm.Launch(ctx, sess.Slot, device)
+	// 3. Boot VM → Booting
+	if err := sess.sm.Transition(session.StateBooting); err != nil {
+		m.snap.DeleteSnapshot(sess.ID) //nolint:errcheck
+		log.Printf("[session %s] transition error: %v", sess.ID[:8], err)
+		return
+	}
+	v, err := m.launcher.Launch(ctx, sess.Slot, device)
 	if err != nil {
-		m.snapMgr.DeleteSnapshot(sess.ID) //nolint:errcheck
+		m.snap.DeleteSnapshot(sess.ID) //nolint:errcheck
 		fail(fmt.Errorf("launch vm: %w", err))
 		return
 	}
 	sess.v = v
 
-	// 4. Wait for SSH
+	// 4. Wait for SSH → WaitingSSH
+	if err := sess.sm.Transition(session.StateWaitingSSH); err != nil {
+		v.Stop(ctx)                    //nolint:errcheck
+		m.snap.DeleteSnapshot(sess.ID) //nolint:errcheck
+		log.Printf("[session %s] transition error: %v", sess.ID[:8], err)
+		return
+	}
 	if err := v.WaitForSSH(ctx); err != nil {
-		v.Stop(ctx)                        //nolint:errcheck
-		m.snapMgr.DeleteSnapshot(sess.ID) //nolint:errcheck
+		v.Stop(ctx)                    //nolint:errcheck
+		m.snap.DeleteSnapshot(sess.ID) //nolint:errcheck
 		fail(fmt.Errorf("wait for ssh: %w", err))
 		return
 	}
 
+	// 5. Git setup → Configuring
+	if err := sess.sm.Transition(session.StateConfiguring); err != nil {
+		log.Printf("[session %s] transition error: %v", sess.ID[:8], err)
+		return
+	}
+
 	vmAddr := fmt.Sprintf("%s:%d", vm.SlotIP(sess.Slot), vm.VMSSHPort)
-	bridge := terminal.NewBridge(vmAddr, m.signer)
+	bridge := m.bridges.NewBridge(vmAddr, m.signer)
 	sess.bridge = bridge
 
-	// 5. Configure git credentials
 	token := githubToken
 	if token == "" {
 		token = loadSavedToken(m.credPath)
@@ -161,7 +271,7 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 	if token != "" {
 		if githubToken != "" {
 			if err := saveToken(m.credPath, githubToken); err != nil {
-				fmt.Printf("[session %s] warning: save token: %v\n", sess.ID[:8], err)
+				log.Printf("[session %s] warning: save token: %v", sess.ID[:8], err)
 			}
 		}
 		cmds := []string{
@@ -169,11 +279,10 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 			fmt.Sprintf(`printf 'https://oauth2:%s@github.com\n' > /root/.git-credentials`, token),
 		}
 		if err := bridge.RunSetup(cmds); err != nil {
-			fmt.Printf("[session %s] warning: git credential setup: %v\n", sess.ID[:8], err)
+			log.Printf("[session %s] warning: git credential setup: %v", sess.ID[:8], err)
 		}
 	}
 
-	// 6. Clone repo
 	if sess.RepoURL != "" {
 		var cloneCmd string
 		if sess.Branch != "" {
@@ -182,14 +291,16 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 			cloneCmd = fmt.Sprintf("git clone %s /root/workspace 2>&1 | tail -5", sess.RepoURL)
 		}
 		if err := bridge.RunSetup([]string{cloneCmd}); err != nil {
-			fmt.Printf("[session %s] warning: git clone: %v\n", sess.ID[:8], err)
+			log.Printf("[session %s] warning: git clone: %v", sess.ID[:8], err)
 		}
 	}
 
-	m.mu.Lock()
-	sess.Status = "ready"
-	m.mu.Unlock()
-	fmt.Printf("[session %s] ready (slot=%d ip=%s)\n", sess.ID[:8], sess.Slot, vm.SlotIP(sess.Slot))
+	// 6. Ready
+	if err := sess.sm.Transition(session.StateReady); err != nil {
+		log.Printf("[session %s] transition error: %v", sess.ID[:8], err)
+		return
+	}
+	log.Printf("[session %s] ready (slot=%d ip=%s)", sess.ID[:8], sess.Slot, vm.SlotIP(sess.Slot))
 }
 
 func (m *SessionManager) Get(id string) (*Session, bool) {
@@ -210,18 +321,28 @@ func (m *SessionManager) List() []*Session {
 }
 
 func (m *SessionManager) Stop(id string) error {
-	m.mu.Lock()
+	m.mu.RLock()
 	sess, ok := m.sessions[id]
+	m.mu.RUnlock()
 	if !ok {
-		m.mu.Unlock()
 		return fmt.Errorf("session %s not found", id)
 	}
-	if sess.Status == "stopped" {
-		m.mu.Unlock()
-		return nil
+
+	if err := sess.sm.Transition(session.StateStopping); err != nil {
+		if !errors.Is(err, session.ErrInvalidTransition) {
+			return err
+		}
+		switch sess.sm.State() {
+		case session.StateStopped:
+			return nil
+		case session.StateStopping:
+			return nil
+		case session.StateFailed:
+			// Fall through to run cleanup.
+		default:
+			return err
+		}
 	}
-	sess.Status = "stopped"
-	m.mu.Unlock()
 
 	sess.cancel()
 	if sess.v != nil {
@@ -229,8 +350,12 @@ func (m *SessionManager) Stop(id string) error {
 		defer cancel()
 		sess.v.Stop(ctx) //nolint:errcheck
 	}
-	m.snapMgr.DeleteSnapshot(id) //nolint:errcheck
+	m.snap.DeleteSnapshot(id) //nolint:errcheck
 	m.freeSlot(sess.Slot)
+
+	if sess.sm.State() == session.StateStopping {
+		sess.sm.Transition(session.StateStopped) //nolint:errcheck
+	}
 	return nil
 }
 
@@ -269,13 +394,11 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 func registerHandlers(mux *http.ServeMux, mgr *SessionManager, rootCtx context.Context) {
-	// Saved token availability (boolean only — never return the token value)
 	mux.HandleFunc("/api/saved-token", func(w http.ResponseWriter, r *http.Request) {
 		has := loadSavedToken(mgr.credPath) != ""
 		writeJSON(w, http.StatusOK, map[string]bool{"has_token": has})
 	})
 
-	// Session list page
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -285,13 +408,11 @@ func registerHandlers(mux *http.ServeMux, mgr *SessionManager, rootCtx context.C
 		w.Write(indexHTML)
 	})
 
-	// Terminal page for a session
 	mux.HandleFunc("/terminal/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		w.Write(terminalHTML)
 	})
 
-	// Create session
 	mux.HandleFunc("/api/sessions", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -319,7 +440,6 @@ func registerHandlers(mux *http.ServeMux, mgr *SessionManager, rootCtx context.C
 		}
 	})
 
-	// Stop / delete session
 	mux.HandleFunc("/api/sessions/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -333,7 +453,6 @@ func registerHandlers(mux *http.ServeMux, mgr *SessionManager, rootCtx context.C
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	// WebSocket terminal
 	mux.HandleFunc("/ws/", func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimPrefix(r.URL.Path, "/ws/")
 		sess, ok := mgr.Get(id)
@@ -341,11 +460,15 @@ func registerHandlers(mux *http.ServeMux, mgr *SessionManager, rootCtx context.C
 			http.Error(w, "session not found", http.StatusNotFound)
 			return
 		}
-		if sess.Status != "ready" {
-			http.Error(w, fmt.Sprintf("session not ready (status: %s)", sess.Status), http.StatusServiceUnavailable)
+		if sess.SessionStatus() != session.StateReady {
+			http.Error(w, fmt.Sprintf("session not ready (status: %s)", sess.SessionStatus()), http.StatusServiceUnavailable)
 			return
 		}
-		sess.bridge.ServeWS(w, r)
+		if b, ok := sess.bridge.(*terminal.Bridge); ok {
+			b.ServeWS(w, r)
+		} else {
+			http.Error(w, "terminal not available", http.StatusInternalServerError)
+		}
 	})
 }
 
@@ -356,7 +479,6 @@ func main() {
 	flag.Parse()
 
 	if *keyFlag == "" {
-		// Fall back to positional arg for backwards compat
 		if flag.NArg() > 0 {
 			*keyFlag = flag.Arg(0)
 		} else {
@@ -404,7 +526,7 @@ func main() {
 	}
 
 	go func() {
-		fmt.Println("[poc] serving on http://192.168.1.35:8080")
+		log.Println("[poc] serving on http://192.168.1.35:8080")
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server: %v", err)
 		}
@@ -414,7 +536,7 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	fmt.Println("[poc] shutting down...")
+	log.Println("[poc] shutting down...")
 	mgr.StopAll()
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutCancel()

@@ -125,9 +125,14 @@
       text-align: center;
     }
     .status-dot.ready    { color: var(--status-ready); }
-    .status-dot.starting { color: var(--status-starting); animation: pulse 1.2s ease-in-out infinite; }
     .status-dot.failed   { color: var(--status-failed); }
     .status-dot.stopped  { color: var(--status-failed); }
+    /* all in-progress states pulse */
+    .status-dot.provisioning,
+    .status-dot.booting,
+    .status-dot.waiting_ssh,
+    .status-dot.configuring,
+    .status-dot.starting { color: var(--status-starting); animation: pulse 1.2s ease-in-out infinite; }
 
     @keyframes pulse {
       0%, 100% { opacity: 1; }
@@ -174,8 +179,12 @@
       color: var(--text-dim);
     }
     .session-status.ready    { color: var(--status-ready); }
-    .session-status.starting { color: var(--status-starting); }
     .session-status.failed   { color: var(--status-failed); }
+    .session-status.provisioning,
+    .session-status.booting,
+    .session-status.waiting_ssh,
+    .session-status.configuring,
+    .session-status.starting { color: var(--status-starting); }
     .session-age {
       flex-shrink: 0;
       font-size: 11px;
@@ -371,6 +380,20 @@
 <script>
   const $ = id => document.getElementById(id);
 
+  const TERMINAL_STATES    = new Set(['stopped', 'failed']);
+  const IN_PROGRESS_STATES = new Set(['provisioning', 'booting', 'waiting_ssh', 'configuring']);
+
+  const STATUS_LABEL = {
+    provisioning: 'provisioning',
+    booting:      'booting',
+    waiting_ssh:  'waiting ssh',
+    configuring:  'configuring',
+    ready:        'ready',
+    stopping:     'stopping',
+    stopped:      'stopped',
+    failed:       'failed',
+  };
+
   // ── Session list polling ──────────────────────────────────────────────────
 
   let pollTimer = null;
@@ -421,7 +444,7 @@
 
   function renderSessions(sessions) {
     const list = $('sessionsList');
-    const active = sessions.filter(s => s.status !== 'stopped' && s.status !== 'failed');
+    const active = sessions.filter(s => !TERMINAL_STATES.has(s.status));
     const count = active.length;
 
     $('sectionTitle').textContent = count === 1
@@ -434,8 +457,8 @@
     }
 
     list.innerHTML = sessions.map(s => {
-      const isTerminal = s.status === 'stopped' || s.status === 'failed';
-      const dotChar = s.status === 'ready' ? '●' : s.status === 'starting' ? '○' : '✕';
+      const isTerminal = TERMINAL_STATES.has(s.status);
+      const dotChar = s.status === 'ready' ? '●' : IN_PROGRESS_STATES.has(s.status) ? '○' : '✕';
       const shortId = s.id.split('-')[0];
       const actions = s.status === 'ready'
         ? `<a class="btn-open" href="/terminal/${s.id}">Open</a>
@@ -453,7 +476,7 @@
           <span class="status-dot ${s.status}">${dotChar}</span>
           <span class="session-id" title="${s.id}">${shortId}</span>
           <div class="session-repo">${repoHtml}</div>
-          <span class="session-status ${s.status}">${s.status}</span>
+          <span class="session-status ${s.status}">${STATUS_LABEL[s.status] || s.status}</span>
           <span class="session-age">${timeAgo(s.created_at)}</span>
           <span class="session-actions">${actions}</span>
         </div>`;
