@@ -373,6 +373,11 @@ func main() {
 		log.Fatalf("parse ssh key: %v", err)
 	}
 
+	log.Println("[startup] cleaning up orphaned VMs...")
+	if err := vm.CleanupOrphans(vm.MaxSlots); err != nil {
+		log.Printf("[startup] cleanup warning: %v", err)
+	}
+
 	snapMgr, err := fc.NewSnapshotManager("/dev/mapper/rubbish-pool", "/opt/rubbish/dm/next-volume-id")
 	if err != nil {
 		log.Fatalf("snapshot manager: %v", err)
