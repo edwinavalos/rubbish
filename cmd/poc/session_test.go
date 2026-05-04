@@ -70,13 +70,13 @@ func (f *fakeSetupRunner) RunSetup(_ []string) error {
 	return nil
 }
 
-type fakeBridgeFactory struct{ runner *fakeSetupRunner }
+type fakeBridgeFactory struct{ runner setupRunner }
 
 func (f *fakeBridgeFactory) NewBridge(_ string, _ ssh.Signer) setupRunner { return f.runner }
 
 // newTestManager builds a SessionManager with all fakes wired in.
 func newTestManager(snap *fakeSnapshotter, launcher *fakeLauncher, bridge *fakeBridgeFactory) *SessionManager {
-	return newSessionManager(snap, launcher, bridge, nil, "")
+	return newSessionManager(snap, launcher, bridge, nil, "", nil)
 }
 
 // waitState polls until the session reaches the target state or times out.

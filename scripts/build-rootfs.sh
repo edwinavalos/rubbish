@@ -3,13 +3,13 @@ set -euo pipefail
 
 ALPINE_VERSION="3.21"
 ALPINE_ARCH="x86_64"
-ROOTFS_SIZE_MB=2048
+ROOTFS_SIZE_MB=4096
 OUTPUT="/opt/rubbish/images/rootfs.ext4"
 MOUNT_DIR=$(mktemp -d)
 WORK_DIR=$(mktemp -d)
 
 # SSH public key to bake in (reads from invoking user's authorized_keys)
-SSH_PUBKEY="${SSH_PUBKEY:-$(cat ~/.ssh/authorized_keys 2>/dev/null | head -1)}"
+SSH_PUBKEY="${SSH_PUBKEY:-$(cat ~/.ssh/authorized_keys 2>/dev/null | head -1 || true)}"
 
 cleanup() {
     umount "${MOUNT_DIR}/proc" 2>/dev/null || true
@@ -60,8 +60,13 @@ chroot "${MOUNT_DIR}" /bin/sh -c "
     apk update &&
     apk add --no-cache openssh bash curl git nodejs npm &&
     npm install -g @anthropic-ai/claude-code &&
+    cd \$(npm root -g)/@anthropic-ai/claude-code &&
+    npm install --save-optional @anthropic-ai/claude-code-linux-x64-musl &&
+    node install.cjs &&
+    cd / &&
     ssh-keygen -A &&
-    passwd -d root
+    passwd -d root &&
+    mkdir -p /root/workspace
 "
 
 # Configure sshd: allow root login, no password auth
@@ -102,4 +107,7 @@ ttyS0::respawn:/sbin/getty -L ttyS0 115200 vt100
 ::shutdown:/bin/sh -c "kill -TERM -1"
 EOF
 
-echo "Rootfs built: ${OUTPUT}"
+BUILD_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+echo "${BUILD_TS}" > "${MOUNT_DIR}/etc/rubbish-build"
+
+echo "Rootfs built: ${OUTPUT} (${BUILD_TS})"

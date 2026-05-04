@@ -152,6 +152,7 @@
   term.loadAddon(fitAddon);
   term.open(document.getElementById('terminal'));
   fitAddon.fit();
+  term.focus();
 
   // Sync xterm viewport background (xterm injects it after open())
   const viewport = document.querySelector('.xterm-viewport');

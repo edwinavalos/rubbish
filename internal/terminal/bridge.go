@@ -52,7 +52,7 @@ func (b *Bridge) RunSetup(commands []string) error {
 	return nil
 }
 
-func (b *Bridge) ServeWS(w http.ResponseWriter, r *http.Request) {
+func (b *Bridge) ServeWS(w http.ResponseWriter, r *http.Request, startCmd string) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -95,7 +95,7 @@ func (b *Bridge) ServeWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := session.Shell(); err != nil {
+	if err := session.Start(startCmd); err != nil {
 		ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("\r\nShell failed: %v\r\n", err)))
 		return
 	}

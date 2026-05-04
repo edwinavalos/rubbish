@@ -18,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 	fc "github.com/edwinavalos/rubbish/internal/compute/firecracker"
+	"github.com/edwinavalos/rubbish/internal/profile"
 	"github.com/edwinavalos/rubbish/internal/session"
 	"github.com/edwinavalos/rubbish/internal/terminal"
 	"github.com/edwinavalos/rubbish/internal/vm"
@@ -29,6 +30,9 @@ var indexHTML []byte
 
 //go:embed static/terminal.html
 var terminalHTML []byte
+
+//go:embed static/profile.html
+var profileHTML []byte
 
 // ---- Interfaces for testability ---------------------------------------------
 
@@ -129,19 +133,21 @@ type SessionManager struct {
 	bridges  bridgeFactory
 	signer   ssh.Signer
 	credPath string
+	prof     *profile.Store
 }
 
-func NewSessionManager(snapMgr *fc.SnapshotManager, signer ssh.Signer, credPath string) *SessionManager {
+func NewSessionManager(snapMgr *fc.SnapshotManager, signer ssh.Signer, credPath string, prof *profile.Store) *SessionManager {
 	return newSessionManager(
 		&realSnapshotter{snapMgr},
 		realVMLauncher{},
 		&realBridgeFactory{signer},
 		signer,
 		credPath,
+		prof,
 	)
 }
 
-func newSessionManager(snap snapshotter, launcher vmLauncher, bridges bridgeFactory, signer ssh.Signer, credPath string) *SessionManager {
+func newSessionManager(snap snapshotter, launcher vmLauncher, bridges bridgeFactory, signer ssh.Signer, credPath string, prof *profile.Store) *SessionManager {
 	return &SessionManager{
 		sessions: make(map[string]*Session),
 		snap:     snap,
@@ -149,6 +155,7 @@ func newSessionManager(snap snapshotter, launcher vmLauncher, bridges bridgeFact
 		bridges:  bridges,
 		signer:   signer,
 		credPath: credPath,
+		prof:     prof,
 	}
 }
 
@@ -189,7 +196,7 @@ func (m *SessionManager) Create(parentCtx context.Context, repoURL, branch, gith
 	sess := &Session{
 		ID:        id,
 		Slot:      slot,
-		RepoURL:   repoURL,
+		RepoURL:   normalizeRepoURL(repoURL),
 		Branch:    branch,
 		CreatedAt: time.Now(),
 		cancel:    cancel,
@@ -265,10 +272,16 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 	sess.bridge = bridge
 
 	token := githubToken
+	if token == "" && m.prof != nil {
+		if p, err := m.prof.Load(); err == nil {
+			token = p.GitHubToken
+		}
+	}
 	if token == "" {
 		token = loadSavedToken(m.credPath)
 	}
 	if token != "" {
+		log.Printf("[session %s] setting up git credentials (token len=%d)", sess.ID[:8], len(token))
 		if githubToken != "" {
 			if err := saveToken(m.credPath, githubToken); err != nil {
 				log.Printf("[session %s] warning: save token: %v", sess.ID[:8], err)
@@ -281,17 +294,43 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		if err := bridge.RunSetup(cmds); err != nil {
 			log.Printf("[session %s] warning: git credential setup: %v", sess.ID[:8], err)
 		}
+	} else {
+		log.Printf("[session %s] no GitHub token available — private repos will fail to clone", sess.ID[:8])
 	}
 
 	if sess.RepoURL != "" {
+		cloneDir := "/root/workspace"
+		if name := repoName(sess.RepoURL); name != "" {
+			cloneDir = "/root/workspace/" + name
+		}
 		var cloneCmd string
 		if sess.Branch != "" {
-			cloneCmd = fmt.Sprintf("git clone -b %s %s /root/workspace 2>&1 | tail -5", sess.Branch, sess.RepoURL)
+			cloneCmd = fmt.Sprintf("git clone -b %s %s %s", sess.Branch, sess.RepoURL, cloneDir)
 		} else {
-			cloneCmd = fmt.Sprintf("git clone %s /root/workspace 2>&1 | tail -5", sess.RepoURL)
+			cloneCmd = fmt.Sprintf("git clone %s %s", sess.RepoURL, cloneDir)
 		}
+		log.Printf("[session %s] cloning %s → %s", sess.ID[:8], sess.RepoURL, cloneDir)
 		if err := bridge.RunSetup([]string{cloneCmd}); err != nil {
 			log.Printf("[session %s] warning: git clone: %v", sess.ID[:8], err)
+		} else {
+			log.Printf("[session %s] clone complete: %s", sess.ID[:8], cloneDir)
+		}
+	}
+
+	// Inject profile credentials into the VM environment.
+	if m.prof != nil {
+		if p, err := m.prof.Load(); err == nil && p.ClaudeOAuthToken != "" {
+			cmds := []string{
+				"mkdir -p /etc/profile.d",
+				fmt.Sprintf("printf 'export CLAUDE_CODE_OAUTH_TOKEN=%s\\n' > /etc/profile.d/rubbish-credentials.sh", p.ClaudeOAuthToken),
+				"chmod 600 /etc/profile.d/rubbish-credentials.sh",
+				// Mark Claude onboarding complete so the token is used without a login prompt.
+				`printf '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.29"}\n' > /root/.claude.json`,
+				"chmod 600 /root/.claude.json",
+			}
+			if err := bridge.RunSetup(cmds); err != nil {
+				log.Printf("[session %s] warning: inject credentials: %v", sess.ID[:8], err)
+			}
 		}
 	}
 
@@ -359,6 +398,39 @@ func (m *SessionManager) Stop(id string) error {
 	return nil
 }
 
+func (m *SessionManager) Restart(parentCtx context.Context, id string) error {
+	m.mu.Lock()
+	sess, ok := m.sessions[id]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("session %s not found", id)
+	}
+	if sess.sm.State() != session.StateStopped {
+		m.mu.Unlock()
+		return fmt.Errorf("session %s is not stopped (status: %s)", id, sess.sm.State())
+	}
+	slot, ok := m.allocSlot()
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("no slots available (max %d concurrent sessions)", vm.MaxSlots)
+	}
+	ctx, cancel := context.WithCancel(parentCtx)
+	sm := session.New(session.StateProvisioning)
+	sm.OnTransition(func(from, to session.State, elapsed time.Duration) {
+		log.Printf("[session %s] %s → %s (%.2fs)", id[:8], from, to, elapsed.Seconds())
+	})
+	sess.Slot = slot
+	sess.cancel = cancel
+	sess.sm = sm
+	sess.v = nil
+	sess.bridge = nil
+	sess.Error = ""
+	m.mu.Unlock()
+
+	go m.boot(ctx, sess, "")
+	return nil
+}
+
 func (m *SessionManager) StopAll() {
 	m.mu.RLock()
 	ids := make([]string, 0, len(m.sessions))
@@ -369,6 +441,45 @@ func (m *SessionManager) StopAll() {
 	for _, id := range ids {
 		m.Stop(id) //nolint:errcheck
 	}
+}
+
+// normalizeRepoURL converts SSH git URLs to HTTPS so the token credential
+// helper works regardless of which format the user pastes.
+// e.g. "git@github.com:user/repo.git" → "https://github.com/user/repo.git"
+func normalizeRepoURL(rawURL string) string {
+	if strings.HasPrefix(rawURL, "git@") {
+		s := strings.TrimPrefix(rawURL, "git@")
+		if idx := strings.Index(s, ":"); idx >= 0 {
+			s = s[:idx] + "/" + s[idx+1:]
+		}
+		return "https://" + s
+	}
+	return rawURL
+}
+
+// repoName extracts the repository name from a clone URL.
+// e.g. "https://github.com/user/myrepo.git" → "myrepo"
+func repoName(url string) string {
+	url = strings.TrimRight(url, "/")
+	url = strings.TrimSuffix(url, ".git")
+	idx := strings.LastIndexAny(url, "/:")
+	if idx < 0 || idx == len(url)-1 {
+		return ""
+	}
+	return url[idx+1:]
+}
+
+// sessionStartCmd returns the shell command used to start the terminal session.
+// If a repo was cloned, it cds into the repo directory and launches claude;
+// falling back to a login shell if claude exits.
+func sessionStartCmd(repoURL string) string {
+	if repoURL != "" {
+		name := repoName(repoURL)
+		if name != "" {
+			return fmt.Sprintf("bash -l -c 'cd /root/workspace/%s 2>/dev/null || cd /root/workspace; claude; exec bash -l'", name)
+		}
+	}
+	return "bash -l -c 'claude; exec bash -l'"
 }
 
 // ---- Credential helpers -----------------------------------------------------
@@ -397,6 +508,53 @@ func registerHandlers(mux *http.ServeMux, mgr *SessionManager, rootCtx context.C
 	mux.HandleFunc("/api/saved-token", func(w http.ResponseWriter, r *http.Request) {
 		has := loadSavedToken(mgr.credPath) != ""
 		writeJSON(w, http.StatusOK, map[string]bool{"has_token": has})
+	})
+
+	mux.HandleFunc("/api/profile", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			resp := map[string]string{"claude_oauth_token": "", "github_token": ""}
+			if mgr.prof != nil {
+				if p, err := mgr.prof.Load(); err == nil {
+					resp["claude_oauth_token"] = profile.MaskToken(p.ClaudeOAuthToken)
+					resp["github_token"] = profile.MaskToken(p.GitHubToken)
+				}
+			}
+			writeJSON(w, http.StatusOK, resp)
+
+		case http.MethodPut:
+			var body struct {
+				ClaudeOAuthToken string `json:"claude_oauth_token"`
+				GitHubToken      string `json:"github_token"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if mgr.prof != nil {
+				// Merge: load existing so omitted fields aren't wiped.
+				existing, _ := mgr.prof.Load()
+				if body.ClaudeOAuthToken != "" {
+					existing.ClaudeOAuthToken = body.ClaudeOAuthToken
+				}
+				if body.GitHubToken != "" {
+					existing.GitHubToken = body.GitHubToken
+				}
+				if err := mgr.prof.Save(existing); err != nil {
+					http.Error(w, "failed to save profile", http.StatusInternalServerError)
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNoContent)
+
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	mux.HandleFunc("/profile", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Write(profileHTML)
 	})
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -441,12 +599,27 @@ func registerHandlers(mux *http.ServeMux, mgr *SessionManager, rootCtx context.C
 	})
 
 	mux.HandleFunc("/api/sessions/", func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
+
+		if strings.HasSuffix(path, "/start") {
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			id := strings.TrimSuffix(path, "/start")
+			if err := mgr.Restart(rootCtx, id); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+
 		if r.Method != http.MethodDelete {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		id := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
-		if err := mgr.Stop(id); err != nil {
+		if err := mgr.Stop(path); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
@@ -465,7 +638,7 @@ func registerHandlers(mux *http.ServeMux, mgr *SessionManager, rootCtx context.C
 			return
 		}
 		if b, ok := sess.bridge.(*terminal.Bridge); ok {
-			b.ServeWS(w, r)
+			b.ServeWS(w, r, sessionStartCmd(sess.RepoURL))
 		} else {
 			http.Error(w, "terminal not available", http.StatusInternalServerError)
 		}
@@ -510,7 +683,8 @@ func main() {
 		log.Fatalf("create creds dir: %v", err)
 	}
 
-	mgr := NewSessionManager(snapMgr, signer, credPath)
+	prof := profile.NewStore("/opt/rubbish/creds/profile.json")
+	mgr := NewSessionManager(snapMgr, signer, credPath, prof)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

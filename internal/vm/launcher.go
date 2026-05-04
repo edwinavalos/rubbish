@@ -112,7 +112,7 @@ func Launch(ctx context.Context, slot int, rootfsPath string) (*VM, error) {
 		return nil, fmt.Errorf("start machine: %w", err)
 	}
 
-	fmt.Printf("[vm slot=%d] boot issued in %s\n", slot, time.Since(t).Round(time.Millisecond))
+	fmt.Printf("[vm slot=%d] boot issued in %s (rootfs=%s)\n", slot, time.Since(t).Round(time.Millisecond), rootfsPath)
 
 	return &VM{
 		machine:    m,

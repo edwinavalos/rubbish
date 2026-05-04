@@ -220,6 +220,18 @@
     }
     .btn-dismiss:hover { color: var(--status-failed); border-color: var(--status-failed); }
 
+    .btn-start {
+      background: transparent;
+      color: var(--status-ready);
+      border: 1px solid var(--status-ready);
+      padding: 3px 10px;
+      border-radius: 3px;
+      font-family: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .btn-start:hover { background: var(--status-ready); color: #fff; }
+
     .empty-state {
       color: var(--text-empty);
       font-size: 13px;
@@ -338,6 +350,7 @@
 
 <header>
   <span class="logo">rubbish</span>
+  <nav style="margin-left:16px;"><a href="/profile" style="color:var(--text-muted);text-decoration:none;font-size:12px;">profile</a></nav>
   <button class="btn-new" id="btnNew">+ New Session</button>
 </header>
 
@@ -361,11 +374,7 @@
       <input type="text" id="inputBranch" placeholder="main">
       <div class="field-hint">Leave blank to clone the default branch.</div>
     </div>
-    <div class="field">
-      <label>GitHub Token <span style="color:var(--text-dimmer)">(optional)</span></label>
-      <input type="password" id="inputToken" placeholder="ghp_...">
-      <div class="field-hint" id="tokenHint">Token is saved server-side and auto-fills on next session.</div>
-    </div>
+
     <div class="modal-status" id="modalStatus">
       <span class="spinner" id="spinner"></span>
       <span id="statusText"></span>
@@ -457,13 +466,19 @@
     }
 
     list.innerHTML = sessions.map(s => {
-      const isTerminal = TERMINAL_STATES.has(s.status);
+      const isDimmed = s.status === 'failed';
       const dotChar = s.status === 'ready' ? '●' : IN_PROGRESS_STATES.has(s.status) ? '○' : '✕';
       const shortId = s.id.split('-')[0];
-      const actions = s.status === 'ready'
-        ? `<a class="btn-open" href="/terminal/${s.id}">Open</a>
-           <button class="btn-dismiss" data-id="${s.id}" onclick="dismissSession('${s.id}')">✕</button>`
-        : `<button class="btn-dismiss" data-id="${s.id}" onclick="dismissSession('${s.id}')">✕</button>`;
+      let actions;
+      if (s.status === 'ready') {
+        actions = `<a class="btn-open" href="/terminal/${s.id}">Open</a>
+           <button class="btn-dismiss" data-id="${s.id}" onclick="dismissSession('${s.id}')">✕</button>`;
+      } else if (s.status === 'stopped') {
+        actions = `<button class="btn-start" onclick="startSession('${s.id}')">Start</button>
+           <button class="btn-dismiss" data-id="${s.id}" onclick="dismissSession('${s.id}')">✕</button>`;
+      } else {
+        actions = `<button class="btn-dismiss" data-id="${s.id}" onclick="dismissSession('${s.id}')">✕</button>`;
+      }
 
       const repo = repoDisplay(s.repo_url);
       const repoHtml = repo
@@ -472,7 +487,7 @@
         : `<div class="session-repo-name" style="color:var(--text-placeholder)">no repo</div>`;
 
       return `
-        <div class="session-card ${isTerminal ? 'dimmed' : ''}">
+        <div class="session-card ${isDimmed ? 'dimmed' : ''}">
           <span class="status-dot ${s.status}">${dotChar}</span>
           <span class="session-id" title="${s.id}">${shortId}</span>
           <div class="session-repo">${repoHtml}</div>
@@ -490,29 +505,22 @@
     await loadSessions();
   }
 
+  async function startSession(id) {
+    try {
+      await fetch(`/api/sessions/${id}/start`, { method: 'POST' });
+    } catch (e) { /* ignore */ }
+    await loadSessions();
+  }
+
   // ── Modal ─────────────────────────────────────────────────────────────────
 
   async function openModal() {
     $('inputRepo').value = '';
     $('inputBranch').value = '';
-    $('inputToken').value = '';
-    $('tokenHint').textContent = 'Token is saved server-side and auto-fills on next session.';
-    $('tokenHint').style.color = '';
     setModalStatus('', false);
     $('btnLaunch').disabled = false;
     $('modalBackdrop').classList.add('open');
     $('inputRepo').focus();
-
-    try {
-      const res = await fetch('/api/saved-token');
-      if (res.ok) {
-        const { has_token } = await res.json();
-        if (has_token) {
-          $('tokenHint').textContent = '✓ Saved token available — leave blank to use it, or paste a new one to replace it.';
-          $('tokenHint').style.color = 'var(--status-ready)';
-        }
-      }
-    } catch (e) { /* non-fatal */ }
   }
 
   function closeModal() {
@@ -530,9 +538,8 @@
   }
 
   async function launchSession() {
-    const repoUrl     = $('inputRepo').value.trim();
-    const branch      = $('inputBranch').value.trim();
-    const githubToken = $('inputToken').value.trim();
+    const repoUrl = $('inputRepo').value.trim();
+    const branch  = $('inputBranch').value.trim();
 
     $('btnLaunch').disabled = true;
     setModalStatus('Starting VM…', true);
@@ -541,7 +548,7 @@
       const res = await fetch('/api/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ repo_url: repoUrl || null, branch: branch || null, github_token: githubToken || null }),
+        body: JSON.stringify({ repo_url: repoUrl || null, branch: branch || null }),
       });
 
       if (!res.ok) {

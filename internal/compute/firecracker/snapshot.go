@@ -67,6 +67,9 @@ func (s *SnapshotManager) CreateSnapshot(sessionID string) (string, error) {
 	}
 
 	devName := "rubbish-session-" + sessionID
+	// Remove any stale device with the same name (can linger after a rapid stop+restart
+	// because firecracker briefly holds an fd to the device after SIGTERM).
+	exec.Command("sudo", "dmsetup", "remove", devName).Run() //nolint:errcheck
 	table := fmt.Sprintf("0 %d thin %s %d", sectors, s.poolDevice, volID)
 	if out, err := exec.Command("sudo", "dmsetup", "create", devName, "--uid", deviceUID, "--table", table).CombinedOutput(); err != nil {
 		exec.Command("sudo", "dmsetup", "message", s.poolDevice, "0", fmt.Sprintf("delete %d", volID)).Run() //nolint:errcheck

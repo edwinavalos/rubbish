@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>rubbish · profile</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:              #0f0f0f;
+      --surface:         #111111;
+      --surface-input:   #0f0f0f;
+      --border:          #1e1e1e;
+      --border-strong:   #2a2a2a;
+      --text-primary:    #e0e0e0;
+      --text-secondary:  #d1d5db;
+      --text-muted:      #9ca3af;
+      --text-dim:        #6b7280;
+      --text-heading:    #f3f4f6;
+      --accent:          #7c3aed;
+      --accent-hover:    #6d28d9;
+      --status-ready:    #22c55e;
+      --status-failed:   #ef4444;
+    }
+
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg:              #f3f4f6;
+        --surface:         #ffffff;
+        --surface-input:   #f9fafb;
+        --border:          #e5e7eb;
+        --border-strong:   #d1d5db;
+        --text-primary:    #111827;
+        --text-secondary:  #374151;
+        --text-muted:      #6b7280;
+        --text-dim:        #9ca3af;
+        --text-heading:    #111827;
+        --accent:          #7c3aed;
+        --accent-hover:    #6d28d9;
+        --status-ready:    #16a34a;
+        --status-failed:   #dc2626;
+      }
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text-primary);
+      font-family: 'Menlo', 'Monaco', 'Consolas', monospace;
+      font-size: 13px;
+      min-height: 100vh;
+    }
+
+    header {
+      border-bottom: 1px solid var(--border);
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+
+    header a.logo {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text-heading);
+      text-decoration: none;
+      letter-spacing: -0.5px;
+    }
+
+    header nav a {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 12px;
+    }
+
+    header nav a:hover { color: var(--text-primary); }
+    header nav a.active { color: var(--accent); }
+
+    main {
+      max-width: 560px;
+      margin: 48px auto;
+      padding: 0 24px;
+    }
+
+    h1 {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text-heading);
+      margin-bottom: 24px;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 24px;
+    }
+
+    .field { margin-bottom: 20px; }
+
+    .label-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    label {
+      display: block;
+      font-size: 11px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .set-badge {
+      display: none;
+      font-size: 11px;
+      color: var(--status-ready);
+    }
+
+    .set-badge.visible { display: inline; }
+
+    input[type="password"], input[type="text"] {
+      width: 100%;
+      background: var(--surface-input);
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      color: var(--text-primary);
+      font-family: inherit;
+      font-size: 12px;
+      padding: 8px 10px;
+      outline: none;
+    }
+
+    input:focus { border-color: var(--accent); }
+
+    .hint {
+      font-size: 11px;
+      color: var(--text-dim);
+      margin-top: 6px;
+    }
+
+    .hint a { color: var(--accent); text-decoration: none; }
+
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 4px;
+    }
+
+    button {
+      background: var(--accent);
+      border: none;
+      border-radius: 4px;
+      color: #fff;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 12px;
+      padding: 8px 16px;
+    }
+
+    button:hover { background: var(--accent-hover); }
+    button:disabled { opacity: 0.5; cursor: default; }
+
+    #status {
+      font-size: 12px;
+      display: none;
+    }
+
+    #status.ok  { color: var(--status-ready); display: inline; }
+    #status.err { color: var(--status-failed); display: inline; }
+  </style>
+</head>
+<body>
+  <header>
+    <a class="logo" href="/">rubbish</a>
+    <nav>
+      <a href="/">sessions</a>
+      &nbsp;·&nbsp;
+      <a href="/profile" class="active">profile</a>
+    </nav>
+  </header>
+
+  <main>
+    <h1>Profile</h1>
+    <div class="card">
+      <div class="field">
+        <div class="label-row">
+          <label for="claude-token">Claude OAuth Token</label>
+          <span class="set-badge" id="claude-set">✓ set</span>
+        </div>
+        <input type="password" id="claude-token" placeholder="sk-ant-oat01-…" autocomplete="off" spellcheck="false">
+        <div class="hint">
+          Generate with <code>claude setup-token</code> on a machine logged in to Claude Pro.
+          Injected as <code>CLAUDE_CODE_OAUTH_TOKEN</code> into every VM at boot.
+        </div>
+      </div>
+      <div class="field">
+        <div class="label-row">
+          <label for="github-token">GitHub Token</label>
+          <span class="set-badge" id="github-set">✓ set</span>
+        </div>
+        <input type="password" id="github-token" placeholder="ghp_…" autocomplete="off" spellcheck="false">
+        <div class="hint">
+          Personal access token with <code>repo</code> scope. Used to clone private repos into VMs.
+        </div>
+      </div>
+      <div class="actions">
+        <button id="save-btn">Save</button>
+        <span id="status"></span>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const claudeInput  = document.getElementById('claude-token');
+    const githubInput  = document.getElementById('github-token');
+    const claudeBadge  = document.getElementById('claude-set');
+    const githubBadge  = document.getElementById('github-set');
+    const saveBtn      = document.getElementById('save-btn');
+    const statusEl     = document.getElementById('status');
+
+    async function load() {
+      try {
+        const r = await fetch('/api/profile');
+        const d = await r.json();
+        claudeBadge.classList.toggle('visible', !!d.claude_oauth_token);
+        githubBadge.classList.toggle('visible', !!d.github_token);
+      } catch {}
+    }
+
+    saveBtn.addEventListener('click', async () => {
+      saveBtn.disabled = true;
+      statusEl.className = '';
+      statusEl.textContent = '';
+
+      const payload = {};
+      if (claudeInput.value.trim()) payload.claude_oauth_token = claudeInput.value.trim();
+      if (githubInput.value.trim()) payload.github_token = githubInput.value.trim();
+
+      try {
+        const r = await fetch('/api/profile', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (r.ok) {
+          statusEl.className = 'ok';
+          statusEl.textContent = 'saved';
+          claudeInput.value = '';
+          githubInput.value = '';
+          load();
+        } else {
+          statusEl.className = 'err';
+          statusEl.textContent = 'error saving';
+        }
+      } catch {
+        statusEl.className = 'err';
+        statusEl.textContent = 'network error';
+      } finally {
+        saveBtn.disabled = false;
+      }
+    });
+
+    load();
+  </script>
+</body>
+</html>
