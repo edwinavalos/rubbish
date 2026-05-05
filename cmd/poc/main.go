@@ -20,6 +20,7 @@ import (
 	fc "github.com/edwinavalos/rubbish/internal/compute/firecracker"
 	"github.com/edwinavalos/rubbish/internal/profile"
 	"github.com/edwinavalos/rubbish/internal/session"
+	"github.com/edwinavalos/rubbish/internal/sessionstore"
 	"github.com/edwinavalos/rubbish/internal/terminal"
 	"github.com/edwinavalos/rubbish/internal/vm"
 	"golang.org/x/crypto/ssh"
@@ -134,9 +135,10 @@ type SessionManager struct {
 	signer   ssh.Signer
 	credPath string
 	prof     *profile.Store
+	store    *sessionstore.Store
 }
 
-func NewSessionManager(snapMgr *fc.SnapshotManager, signer ssh.Signer, credPath string, prof *profile.Store) *SessionManager {
+func NewSessionManager(snapMgr *fc.SnapshotManager, signer ssh.Signer, credPath string, prof *profile.Store, store *sessionstore.Store) *SessionManager {
 	return newSessionManager(
 		&realSnapshotter{snapMgr},
 		realVMLauncher{},
@@ -144,10 +146,11 @@ func NewSessionManager(snapMgr *fc.SnapshotManager, signer ssh.Signer, credPath 
 		signer,
 		credPath,
 		prof,
+		store,
 	)
 }
 
-func newSessionManager(snap snapshotter, launcher vmLauncher, bridges bridgeFactory, signer ssh.Signer, credPath string, prof *profile.Store) *SessionManager {
+func newSessionManager(snap snapshotter, launcher vmLauncher, bridges bridgeFactory, signer ssh.Signer, credPath string, prof *profile.Store, store *sessionstore.Store) *SessionManager {
 	return &SessionManager{
 		sessions: make(map[string]*Session),
 		snap:     snap,
@@ -156,7 +159,40 @@ func newSessionManager(snap snapshotter, launcher vmLauncher, bridges bridgeFact
 		signer:   signer,
 		credPath: credPath,
 		prof:     prof,
+		store:    store,
 	}
+}
+
+func (m *SessionManager) persistSession(sess *Session) {
+	if m.store == nil {
+		return
+	}
+	m.mu.RLock()
+	row := sessionstore.Row{
+		ID:        sess.ID,
+		Slot:      sess.Slot,
+		Status:    string(sess.sm.State()),
+		RepoURL:   sess.RepoURL,
+		Branch:    sess.Branch,
+		ErrorMsg:  sess.Error,
+		CreatedAt: sess.CreatedAt,
+		UpdatedAt: time.Now(),
+	}
+	m.mu.RUnlock()
+	if err := m.store.Upsert(row); err != nil {
+		log.Printf("[session %s] persist error: %v", sess.ID[:8], err)
+	}
+}
+
+// newSM creates a state machine starting at initial with logging and DB-persist
+// hooks wired up. sess must be the owning Session (pointer is safe to capture).
+func (m *SessionManager) newSM(sess *Session, initial session.State) *session.StateMachine {
+	sm := session.New(initial)
+	sm.OnTransition(func(from, to session.State, elapsed time.Duration) {
+		log.Printf("[session %s] %s → %s (%.2fs)", sess.ID[:8], from, to, elapsed.Seconds())
+		m.persistSession(sess)
+	})
+	return sm
 }
 
 func (m *SessionManager) allocSlot() (int, bool) {
@@ -188,11 +224,6 @@ func (m *SessionManager) Create(parentCtx context.Context, repoURL, branch, gith
 	id := uuid.New().String()
 	ctx, cancel := context.WithCancel(parentCtx)
 
-	sm := session.New(session.StateProvisioning)
-	sm.OnTransition(func(from, to session.State, elapsed time.Duration) {
-		log.Printf("[session %s] %s → %s (%.2fs)", id[:8], from, to, elapsed.Seconds())
-	})
-
 	sess := &Session{
 		ID:        id,
 		Slot:      slot,
@@ -200,22 +231,23 @@ func (m *SessionManager) Create(parentCtx context.Context, repoURL, branch, gith
 		Branch:    branch,
 		CreatedAt: time.Now(),
 		cancel:    cancel,
-		sm:        sm,
 	}
+	sess.sm = m.newSM(sess, session.StateProvisioning)
 	m.sessions[id] = sess
 	m.mu.Unlock()
 
+	m.persistSession(sess) // initial provisioning state
 	go m.boot(ctx, sess, githubToken)
 	return sess, nil
 }
 
 func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken string) {
 	fail := func(err error) {
-		sess.sm.Transition(session.StateFailed) //nolint:errcheck
 		m.mu.Lock()
 		sess.Error = err.Error()
 		m.slots[sess.Slot] = false
 		m.mu.Unlock()
+		sess.sm.Transition(session.StateFailed) //nolint:errcheck — hook persists
 		log.Printf("[session %s] failed: %v", sess.ID[:8], err)
 	}
 
@@ -372,12 +404,16 @@ func (m *SessionManager) Stop(id string) error {
 			return err
 		}
 		switch sess.sm.State() {
-		case session.StateStopped:
+		case session.StateStopped, session.StateFailed:
+			m.mu.Lock()
+			delete(m.sessions, id)
+			m.mu.Unlock()
+			if m.store != nil {
+				m.store.Delete(id) //nolint:errcheck
+			}
 			return nil
 		case session.StateStopping:
 			return nil
-		case session.StateFailed:
-			// Fall through to run cleanup.
 		default:
 			return err
 		}
@@ -415,18 +451,15 @@ func (m *SessionManager) Restart(parentCtx context.Context, id string) error {
 		return fmt.Errorf("no slots available (max %d concurrent sessions)", vm.MaxSlots)
 	}
 	ctx, cancel := context.WithCancel(parentCtx)
-	sm := session.New(session.StateProvisioning)
-	sm.OnTransition(func(from, to session.State, elapsed time.Duration) {
-		log.Printf("[session %s] %s → %s (%.2fs)", id[:8], from, to, elapsed.Seconds())
-	})
 	sess.Slot = slot
 	sess.cancel = cancel
-	sess.sm = sm
 	sess.v = nil
 	sess.bridge = nil
 	sess.Error = ""
+	sess.sm = m.newSM(sess, session.StateProvisioning)
 	m.mu.Unlock()
 
+	m.persistSession(sess) // initial provisioning state for the restart
 	go m.boot(ctx, sess, "")
 	return nil
 }
@@ -440,6 +473,105 @@ func (m *SessionManager) StopAll() {
 	m.mu.RUnlock()
 	for _, id := range ids {
 		m.Stop(id) //nolint:errcheck
+	}
+}
+
+// loadFromDB populates the manager with sessions persisted in the store.
+// For ready sessions whose Firecracker process is still alive (server restart),
+// it reconnects them using a DetachedVM. For sessions that cannot be recovered
+// it marks them failed. True orphan FC processes are killed.
+// Must be called before the server starts accepting requests.
+func (m *SessionManager) loadFromDB(parentCtx context.Context) {
+	if m.store == nil {
+		return
+	}
+	rows, err := m.store.List()
+	if err != nil {
+		log.Printf("[startup] load sessions from DB: %v", err)
+		return
+	}
+
+	liveSlots := make(map[int]bool)
+
+	for _, row := range rows {
+		status := session.State(row.Status)
+		ctx, cancel := context.WithCancel(parentCtx)
+
+		sess := &Session{
+			ID:        row.ID,
+			Slot:      row.Slot,
+			RepoURL:   row.RepoURL,
+			Branch:    row.Branch,
+			CreatedAt: row.CreatedAt,
+			Error:     row.ErrorMsg,
+			cancel:    cancel,
+		}
+
+		switch status {
+		case session.StateReady:
+			if vm.IsSocketAlive(row.Slot) {
+				// Server process restarted but the FC VM is still running — reconnect.
+				sess.sm = m.newSM(sess, session.StateReady)
+				sess.v = vm.NewDetachedVM(row.Slot)
+				vmAddr := fmt.Sprintf("%s:%d", vm.SlotIP(row.Slot), vm.VMSSHPort)
+				sess.bridge = m.bridges.NewBridge(vmAddr, m.signer)
+				liveSlots[row.Slot] = true
+				log.Printf("[startup] recovered ready session %s (slot=%d ip=%s)", row.ID[:8], row.Slot, vm.SlotIP(row.Slot))
+			} else {
+				// Host restarted — VM is gone.
+				cancel()
+				ctx, cancel = context.WithCancel(parentCtx)
+				sess.cancel = cancel
+				sess.Error = "lost on host restart"
+				sess.sm = m.newSM(sess, session.StateFailed)
+				m.store.Upsert(sessionstore.Row{ //nolint:errcheck
+					ID: row.ID, Slot: row.Slot, Status: string(session.StateFailed),
+					RepoURL: row.RepoURL, Branch: row.Branch, ErrorMsg: sess.Error,
+					CreatedAt: row.CreatedAt, UpdatedAt: time.Now(),
+				})
+				log.Printf("[startup] session %s was ready but VM is gone, marked failed", row.ID[:8])
+			}
+
+		case session.StateProvisioning, session.StateBooting,
+			session.StateWaitingSSH, session.StateConfiguring, session.StateStopping:
+			// Mid-boot / mid-stop state — kill any surviving FC and mark failed.
+			cancel()
+			ctx, cancel = context.WithCancel(parentCtx)
+			sess.cancel = cancel
+			if vm.IsSocketAlive(row.Slot) {
+				d := vm.NewDetachedVM(row.Slot)
+				d.Stop(context.Background()) //nolint:errcheck
+			}
+			sess.Error = "lost on server restart"
+			sess.sm = m.newSM(sess, session.StateFailed)
+			m.store.Upsert(sessionstore.Row{ //nolint:errcheck
+				ID: row.ID, Slot: row.Slot, Status: string(session.StateFailed),
+				RepoURL: row.RepoURL, Branch: row.Branch, ErrorMsg: sess.Error,
+				CreatedAt: row.CreatedAt, UpdatedAt: time.Now(),
+			})
+			log.Printf("[startup] session %s in mid-boot state %s, marked failed", row.ID[:8], status)
+
+		default: // stopped, failed — terminal states, load as-is
+			cancel()
+			ctx, cancel = context.WithCancel(parentCtx)
+			sess.cancel = cancel
+			sess.sm = m.newSM(sess, status)
+			log.Printf("[startup] loaded terminal session %s (%s)", row.ID[:8], status)
+		}
+
+		_ = ctx // context held by sess.cancel; suppresses unused-variable warning
+
+		m.mu.Lock()
+		m.sessions[row.ID] = sess
+		if liveSlots[row.Slot] {
+			m.slots[row.Slot] = true
+		}
+		m.mu.Unlock()
+	}
+
+	// Kill any FC sockets that have no corresponding DB session.
+	if err := vm.CleanupOrphansExcept(vm.MaxSlots, liveSlots); err != nil {
+		log.Printf("[startup] cleanup orphans warning: %v", err)
 	}
 }
 
@@ -668,11 +800,6 @@ func main() {
 		log.Fatalf("parse ssh key: %v", err)
 	}
 
-	log.Println("[startup] cleaning up orphaned VMs...")
-	if err := vm.CleanupOrphans(vm.MaxSlots); err != nil {
-		log.Printf("[startup] cleanup warning: %v", err)
-	}
-
 	snapMgr, err := fc.NewSnapshotManager("/dev/mapper/rubbish-pool", "/opt/rubbish/dm/next-volume-id")
 	if err != nil {
 		log.Fatalf("snapshot manager: %v", err)
@@ -683,8 +810,17 @@ func main() {
 		log.Fatalf("create creds dir: %v", err)
 	}
 
+	store, err := sessionstore.Open("/opt/rubbish/sessions.db")
+	if err != nil {
+		log.Fatalf("open session store: %v", err)
+	}
+	defer store.Close()
+
 	prof := profile.NewStore("/opt/rubbish/creds/profile.json")
-	mgr := NewSessionManager(snapMgr, signer, credPath, prof)
+	mgr := NewSessionManager(snapMgr, signer, credPath, prof, store)
+
+	log.Println("[startup] recovering sessions from DB...")
+	mgr.loadFromDB(context.Background())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -711,7 +847,8 @@ func main() {
 	<-quit
 
 	log.Println("[poc] shutting down...")
-	mgr.StopAll()
+	// Do NOT call StopAll — ready VMs are left running so they can be recovered
+	// on the next startup via loadFromDB + DetachedVM reconnection.
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutCancel()
 	srv.Shutdown(shutCtx) //nolint:errcheck

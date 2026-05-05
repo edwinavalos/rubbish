@@ -67,6 +67,9 @@ func Launch(ctx context.Context, slot int, rootfsPath string) (*VM, error) {
 		// ip= tells the kernel to configure eth0 before userspace starts.
 		// Alpine's ifup then sees "File exists" and skips — harmless.
 		KernelArgs: fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off nomodules ro ip=%s::172.16.0.1:255.255.255.0::eth0:off", ip),
+		// Empty (not nil) disables the SDK's default signal-forwarding behaviour,
+		// which would otherwise forward SIGTERM to Firecracker when rubbish-poc exits.
+		ForwardSignals: []os.Signal{},
 		Drives: []models.Drive{
 			{
 				DriveID:      firecracker.String("rootfs"),
@@ -92,15 +95,21 @@ func Launch(ctx context.Context, slot int, rootfsPath string) (*VM, error) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.WarnLevel)
 
+	// Use context.Background() for the machine so the FC process is NOT tied to
+	// the session or server context. This lets VMs survive a rubbish-poc restart —
+	// the process keeps running and is reconnected via DetachedVM on next startup.
+	// The session ctx is still used for WaitForSSH cancellation below.
+	machineCtx := context.Background()
+
 	cmd := firecracker.VMCommandBuilder{}.
 		WithBin(FCBinary).
 		WithSocketPath(sock).
 		WithStdin(os.Stdin).
 		WithStdout(os.Stdout).
 		WithStderr(os.Stderr).
-		Build(ctx)
+		Build(machineCtx)
 
-	m, err := firecracker.NewMachine(ctx, cfg,
+	m, err := firecracker.NewMachine(machineCtx, cfg,
 		firecracker.WithProcessRunner(cmd),
 		firecracker.WithLogger(logrus.NewEntry(logger)),
 	)
@@ -108,7 +117,7 @@ func Launch(ctx context.Context, slot int, rootfsPath string) (*VM, error) {
 		return nil, fmt.Errorf("new machine: %w", err)
 	}
 
-	if err := m.Start(ctx); err != nil {
+	if err := m.Start(machineCtx); err != nil {
 		return nil, fmt.Errorf("start machine: %w", err)
 	}
 

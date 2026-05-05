@@ -22,16 +22,44 @@ func (realCommander) command(name string, arg ...string) *exec.Cmd {
 	return exec.Command(name, arg...)
 }
 
+// IsSocketAlive returns true if a Firecracker socket exists at the given slot
+// and a live process is holding it.
+func IsSocketAlive(slot int) bool {
+	sock := SlotSocket(slot)
+	if _, err := os.Stat(sock); err != nil {
+		return false
+	}
+	out, err := exec.Command("lsof", "-t", sock).Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) != ""
+}
+
 // CleanupOrphans kills stray Firecracker processes and tears down their TAP
 // devices. Safe to call at startup even if no orphans exist.
 func CleanupOrphans(maxSlots int) error {
-	return cleanupOrphans(maxSlots, realCommander{})
+	return cleanupOrphansExcept(maxSlots, nil, realCommander{})
+}
+
+// CleanupOrphansExcept kills stray Firecracker processes for all slots except
+// those in skipSlots, which hold intentionally recovered sessions.
+func CleanupOrphansExcept(maxSlots int, skipSlots map[int]bool) error {
+	return cleanupOrphansExcept(maxSlots, skipSlots, realCommander{})
 }
 
 func cleanupOrphans(maxSlots int, cmd commander) error {
+	return cleanupOrphansExcept(maxSlots, nil, cmd)
+}
+
+func cleanupOrphansExcept(maxSlots int, skipSlots map[int]bool, cmd commander) error {
 	var errs []string
 
 	for slot := 0; slot < maxSlots; slot++ {
+		if skipSlots[slot] {
+			continue
+		}
+
 		sock := SlotSocket(slot)
 		tap := SlotTAP(slot)
 
@@ -59,8 +87,24 @@ func cleanupOrphans(maxSlots int, cmd commander) error {
 		}
 	}
 
-	// Belt-and-suspenders: kill any stray FC processes not caught above.
-	cmd.command("pkill", "-f", "firecracker --api-sock /tmp/rubbish-fc").Run() //nolint:errcheck
+	// Belt-and-suspenders: kill stray FC processes on non-skipped slots only.
+	// We can't use a blanket pkill here because it would also kill recovered
+	// sessions on live slots.
+	for slot := 0; slot < maxSlots; slot++ {
+		if skipSlots[slot] {
+			continue
+		}
+		sock := fmt.Sprintf("/tmp/rubbish-fc-%d.sock", slot)
+		out, err := cmd.command("lsof", "-t", sock).Output()
+		if err == nil {
+			pidStr := strings.TrimSpace(string(out))
+			if pidStr != "" {
+				if pid, parseErr := strconv.Atoi(pidStr); parseErr == nil {
+					killProcess(pid)
+				}
+			}
+		}
+	}
 
 	if len(errs) > 0 {
 		return errors.New(strings.Join(errs, "; "))
