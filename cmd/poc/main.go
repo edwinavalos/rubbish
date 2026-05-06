@@ -180,6 +180,7 @@ func (m *SessionManager) persistSession(sess *Session) {
 		RepoURL:   sess.RepoURL,
 		Branch:    sess.Branch,
 		ErrorMsg:  sess.Error,
+		DevMode:   sess.DevMode,
 		CreatedAt: sess.CreatedAt,
 		UpdatedAt: time.Now(),
 	}
@@ -523,6 +524,7 @@ func (m *SessionManager) loadFromDB(parentCtx context.Context) {
 			Slot:      row.Slot,
 			RepoURL:   row.RepoURL,
 			Branch:    row.Branch,
+			DevMode:   row.DevMode,
 			CreatedAt: row.CreatedAt,
 			Error:     row.ErrorMsg,
 			cancel:    cancel,
@@ -548,7 +550,7 @@ func (m *SessionManager) loadFromDB(parentCtx context.Context) {
 				m.store.Upsert(sessionstore.Row{ //nolint:errcheck
 					ID: row.ID, Slot: row.Slot, Status: string(session.StateFailed),
 					RepoURL: row.RepoURL, Branch: row.Branch, ErrorMsg: sess.Error,
-					CreatedAt: row.CreatedAt, UpdatedAt: time.Now(),
+					DevMode: row.DevMode, CreatedAt: row.CreatedAt, UpdatedAt: time.Now(),
 				})
 				log.Printf("[startup] session %s was ready but VM is gone, marked failed", row.ID[:8])
 			}
@@ -568,7 +570,7 @@ func (m *SessionManager) loadFromDB(parentCtx context.Context) {
 			m.store.Upsert(sessionstore.Row{ //nolint:errcheck
 				ID: row.ID, Slot: row.Slot, Status: string(session.StateFailed),
 				RepoURL: row.RepoURL, Branch: row.Branch, ErrorMsg: sess.Error,
-				CreatedAt: row.CreatedAt, UpdatedAt: time.Now(),
+				DevMode: row.DevMode, CreatedAt: row.CreatedAt, UpdatedAt: time.Now(),
 			})
 			log.Printf("[startup] session %s in mid-boot state %s, marked failed", row.ID[:8], status)
 

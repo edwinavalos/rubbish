@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     repo_url   TEXT NOT NULL DEFAULT '',
     branch     TEXT NOT NULL DEFAULT '',
     error_msg  TEXT NOT NULL DEFAULT '',
+    dev_mode   INTEGER NOT NULL DEFAULT 0,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL
 );
@@ -35,6 +36,7 @@ type Row struct {
 	RepoURL   string
 	Branch    string
 	ErrorMsg  string
+	DevMode   bool
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -55,6 +57,8 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
+	// Migrate existing databases that predate the dev_mode column.
+	_, _ = db.Exec(`ALTER TABLE sessions ADD COLUMN dev_mode INTEGER NOT NULL DEFAULT 0`)
 	return &Store{db: db}, nil
 }
 
@@ -63,17 +67,22 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // Upsert inserts or updates a session row.
 func (s *Store) Upsert(r Row) error {
+	devMode := 0
+	if r.DevMode {
+		devMode = 1
+	}
 	_, err := s.db.Exec(`
-		INSERT INTO sessions (id, slot, status, repo_url, branch, error_msg, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO sessions (id, slot, status, repo_url, branch, error_msg, dev_mode, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
-			slot      = excluded.slot,
-			status    = excluded.status,
-			repo_url  = excluded.repo_url,
-			branch    = excluded.branch,
-			error_msg = excluded.error_msg,
+			slot       = excluded.slot,
+			status     = excluded.status,
+			repo_url   = excluded.repo_url,
+			branch     = excluded.branch,
+			error_msg  = excluded.error_msg,
+			dev_mode   = excluded.dev_mode,
 			updated_at = excluded.updated_at`,
-		r.ID, r.Slot, r.Status, r.RepoURL, r.Branch, r.ErrorMsg,
+		r.ID, r.Slot, r.Status, r.RepoURL, r.Branch, r.ErrorMsg, devMode,
 		r.CreatedAt.UTC().Format(time.RFC3339Nano),
 		r.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	)
@@ -142,7 +151,7 @@ func (s *Store) ListFavorites() ([]Favorite, error) {
 // List returns all session rows ordered by created_at ascending.
 func (s *Store) List() ([]Row, error) {
 	rows, err := s.db.Query(`
-		SELECT id, slot, status, repo_url, branch, error_msg, created_at, updated_at
+		SELECT id, slot, status, repo_url, branch, error_msg, dev_mode, created_at, updated_at
 		FROM sessions ORDER BY created_at`)
 	if err != nil {
 		return nil, err
@@ -152,10 +161,12 @@ func (s *Store) List() ([]Row, error) {
 	var out []Row
 	for rows.Next() {
 		var r Row
+		var devMode int
 		var createdAt, updatedAt string
-		if err := rows.Scan(&r.ID, &r.Slot, &r.Status, &r.RepoURL, &r.Branch, &r.ErrorMsg, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.Slot, &r.Status, &r.RepoURL, &r.Branch, &r.ErrorMsg, &devMode, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
+		r.DevMode = devMode != 0
 		r.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 		r.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
 		out = append(out, r)
