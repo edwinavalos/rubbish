@@ -623,11 +623,11 @@ const nfsBase = "/opt/rubbish/claude-shared"
 func seedDevFiles(bridge setupRunner) error {
 	const (
 		hostIP         = "192.168.1.35"
-		nfsGlobalMem   = nfsBase + "/memory"
-		nfsProjectMem  = nfsBase + "/projects/-root-workspace-rubbish/memory"
-		vmGlobalMem    = "/root/.claude/memory"
-		vmProjectMem   = "/root/.claude/projects/-root-workspace-rubbish/memory"
-		nfsMountOpts   = "vers=4,noatime,soft"
+		nfsGlobalMem  = nfsBase + "/memory"
+		nfsProjects   = nfsBase + "/projects"
+		vmGlobalMem   = "/root/.claude/memory"
+		vmProjects    = "/root/.claude/projects"
+		nfsMountOpts  = "vers=4,noatime,soft"
 	)
 
 	// injectFile base64-encodes a host file and writes it into the VM.
@@ -645,7 +645,7 @@ func seedDevFiles(bridge setupRunner) error {
 	if err := bridge.RunSetup([]string{
 		"mkdir -p /root/.claude",
 		"mkdir -p " + vmGlobalMem,
-		"mkdir -p " + vmProjectMem,
+		"mkdir -p " + vmProjects,
 		"mkdir -p /root/.ssh",
 	}); err != nil {
 		return fmt.Errorf("seed mkdirs: %w", err)
@@ -659,7 +659,7 @@ func seedDevFiles(bridge setupRunner) error {
 	// Memory dirs — NFS-mounted for live shared read/write across all dev sessions.
 	if err := bridge.RunSetup([]string{
 		fmt.Sprintf("mount -t nfs %s:%s %s -o %s", hostIP, nfsGlobalMem, vmGlobalMem, nfsMountOpts),
-		fmt.Sprintf("mount -t nfs %s:%s %s -o %s", hostIP, nfsProjectMem, vmProjectMem, nfsMountOpts),
+		fmt.Sprintf("mount -t nfs %s:%s %s -o %s", hostIP, nfsProjects, vmProjects, nfsMountOpts),
 	}); err != nil {
 		return fmt.Errorf("nfs mount: %w", err)
 	}
