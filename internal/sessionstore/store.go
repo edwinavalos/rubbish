@@ -18,6 +18,13 @@ CREATE TABLE IF NOT EXISTS sessions (
     error_msg  TEXT NOT NULL DEFAULT '',
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL
+);
+CREATE TABLE IF NOT EXISTS favorites (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL DEFAULT '',
+    repo_url   TEXT NOT NULL DEFAULT '',
+    branch     TEXT NOT NULL DEFAULT '',
+    created_at DATETIME NOT NULL
 );`
 
 // Row is the persisted representation of a session.
@@ -77,6 +84,59 @@ func (s *Store) Upsert(r Row) error {
 func (s *Store) Delete(id string) error {
 	_, err := s.db.Exec(`DELETE FROM sessions WHERE id = ?`, id)
 	return err
+}
+
+// Favorite is a saved launch template (repo + branch + display name).
+type Favorite struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	RepoURL   string    `json:"repo_url"`
+	Branch    string    `json:"branch"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// UpsertFavorite inserts or replaces a favorite row.
+func (s *Store) UpsertFavorite(f Favorite) error {
+	_, err := s.db.Exec(`
+		INSERT INTO favorites (id, name, repo_url, branch, created_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			name       = excluded.name,
+			repo_url   = excluded.repo_url,
+			branch     = excluded.branch`,
+		f.ID, f.Name, f.RepoURL, f.Branch,
+		f.CreatedAt.UTC().Format(time.RFC3339Nano),
+	)
+	return err
+}
+
+// DeleteFavorite removes a favorite row. No-ops if the row does not exist.
+func (s *Store) DeleteFavorite(id string) error {
+	_, err := s.db.Exec(`DELETE FROM favorites WHERE id = ?`, id)
+	return err
+}
+
+// ListFavorites returns all favorites ordered by created_at ascending.
+func (s *Store) ListFavorites() ([]Favorite, error) {
+	rows, err := s.db.Query(`
+		SELECT id, name, repo_url, branch, created_at
+		FROM favorites ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Favorite
+	for rows.Next() {
+		var f Favorite
+		var createdAt string
+		if err := rows.Scan(&f.ID, &f.Name, &f.RepoURL, &f.Branch, &createdAt); err != nil {
+			return nil, err
+		}
+		f.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		out = append(out, f)
+	}
+	return out, rows.Err()
 }
 
 // List returns all session rows ordered by created_at ascending.

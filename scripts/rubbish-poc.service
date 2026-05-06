@@ -1,0 +1,18 @@
+[Unit]
+Description=Rubbish PoC — coding agent VM manager
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/rubbish-poc --key /opt/rubbish/ssh/id_ed25519
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/var/log/rubbish.log
+StandardError=append:/var/log/rubbish.log
+# Only signal the main process so Firecracker child VMs keep running
+KillSignal=SIGTERM
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -89,6 +91,7 @@ type Session struct {
 	Slot      int       `json:"slot"`
 	RepoURL   string    `json:"repo_url"`
 	Branch    string    `json:"branch,omitempty"`
+	DevMode   bool      `json:"dev_mode,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	Error     string    `json:"error,omitempty"`
 
@@ -109,6 +112,7 @@ func (s *Session) MarshalJSON() ([]byte, error) {
 		Status    session.State `json:"status"`
 		RepoURL   string        `json:"repo_url"`
 		Branch    string        `json:"branch,omitempty"`
+		DevMode   bool          `json:"dev_mode,omitempty"`
 		CreatedAt time.Time     `json:"created_at"`
 		Error     string        `json:"error,omitempty"`
 	}
@@ -118,6 +122,7 @@ func (s *Session) MarshalJSON() ([]byte, error) {
 		Status:    s.sm.State(),
 		RepoURL:   s.RepoURL,
 		Branch:    s.Branch,
+		DevMode:   s.DevMode,
 		CreatedAt: s.CreatedAt,
 		Error:     s.Error,
 	})
@@ -213,7 +218,7 @@ func (m *SessionManager) freeSlot(slot int) {
 
 // Create allocates a slot and starts a VM in the background.
 // Returns immediately with status "provisioning".
-func (m *SessionManager) Create(parentCtx context.Context, repoURL, branch, githubToken string) (*Session, error) {
+func (m *SessionManager) Create(parentCtx context.Context, repoURL, branch, githubToken string, devMode bool) (*Session, error) {
 	m.mu.Lock()
 	slot, ok := m.allocSlot()
 	if !ok {
@@ -229,6 +234,7 @@ func (m *SessionManager) Create(parentCtx context.Context, repoURL, branch, gith
 		Slot:      slot,
 		RepoURL:   normalizeRepoURL(repoURL),
 		Branch:    branch,
+		DevMode:   devMode,
 		CreatedAt: time.Now(),
 		cancel:    cancel,
 	}
@@ -366,7 +372,15 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		}
 	}
 
-	// 6. Ready
+	// 6. Dev seed (optional)
+	if sess.DevMode {
+		log.Printf("[session %s] seeding dev files", sess.ID[:8])
+		if err := seedDevFiles(bridge); err != nil {
+			log.Printf("[session %s] warning: dev seed: %v", sess.ID[:8], err)
+		}
+	}
+
+	// 7. Ready
 	if err := sess.sm.Transition(session.StateReady); err != nil {
 		log.Printf("[session %s] transition error: %v", sess.ID[:8], err)
 		return
@@ -388,6 +402,9 @@ func (m *SessionManager) List() []*Session {
 	for _, s := range m.sessions {
 		out = append(out, s)
 	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
 	return out
 }
 
@@ -589,6 +606,93 @@ func normalizeRepoURL(rawURL string) string {
 	return rawURL
 }
 
+const devSeedDir = "/opt/rubbish/dev-seed"
+
+// seedDevFiles injects developer context into a VM via SSH commands:
+//   - Claude Code global CLAUDE.md + memory files
+//   - Project memory (remapped to the VM clone path)
+//   - Deploy SSH key + SSH config + known_hosts for passwordless deploy to host
+func seedDevFiles(bridge setupRunner) error {
+	const hostIP = "192.168.1.35"
+
+	if err := bridge.RunSetup([]string{
+		"mkdir -p /root/.claude/memory",
+		"mkdir -p /root/.claude/projects/-root-workspace-rubbish/memory",
+		"mkdir -p /root/.ssh",
+	}); err != nil {
+		return fmt.Errorf("seed mkdirs: %w", err)
+	}
+
+	// injectFile base64-encodes a host file and decodes it inside the VM.
+	injectFile := func(srcPath, dstPath string) error {
+		data, err := os.ReadFile(srcPath)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", srcPath, err)
+		}
+		encoded := base64.StdEncoding.EncodeToString(data)
+		cmd := fmt.Sprintf("echo '%s' | base64 -d > %s", encoded, dstPath)
+		return bridge.RunSetup([]string{cmd})
+	}
+
+	// injectDir injects every .md file from a host dir into a VM dir.
+	injectDir := func(srcDir, dstDir string) error {
+		entries, err := os.ReadDir(srcDir)
+		if err != nil {
+			return fmt.Errorf("read dir %s: %w", srcDir, err)
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+				continue
+			}
+			if err := injectFile(srcDir+"/"+e.Name(), dstDir+"/"+e.Name()); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// Claude Code context (non-fatal — log and continue)
+	if err := injectFile(devSeedDir+"/claude/CLAUDE.md", "/root/.claude/CLAUDE.md"); err != nil {
+		log.Printf("[seed] warning: CLAUDE.md: %v", err)
+	}
+	if err := injectDir(devSeedDir+"/claude/memory", "/root/.claude/memory"); err != nil {
+		log.Printf("[seed] warning: global memory: %v", err)
+	}
+	if err := injectDir(devSeedDir+"/claude/project-memory", "/root/.claude/projects/-root-workspace-rubbish/memory"); err != nil {
+		log.Printf("[seed] warning: project memory: %v", err)
+	}
+
+	// Deploy SSH key (fatal — without it the VM can't deploy)
+	if err := injectFile(devSeedDir+"/id_deploy", "/root/.ssh/id_deploy"); err != nil {
+		return fmt.Errorf("inject deploy key: %w", err)
+	}
+	if err := bridge.RunSetup([]string{"chmod 600 /root/.ssh/id_deploy"}); err != nil {
+		return fmt.Errorf("chmod deploy key: %w", err)
+	}
+
+	// SSH config so `ssh 192.168.1.35` uses the deploy key as claude
+	sshConfig := fmt.Sprintf("Host %s\n  User claude\n  IdentityFile /root/.ssh/id_deploy\n  StrictHostKeyChecking yes\n", hostIP)
+	if err := bridge.RunSetup([]string{
+		fmt.Sprintf("printf '%%s' %q > /root/.ssh/config", sshConfig),
+		"chmod 600 /root/.ssh/config",
+	}); err != nil {
+		return fmt.Errorf("ssh config: %w", err)
+	}
+
+	// Pre-trust the host fingerprint so first deploy doesn't prompt
+	knownHosts, err := os.ReadFile(devSeedDir + "/known_hosts")
+	if err == nil && len(knownHosts) > 0 {
+		if err := injectFile(devSeedDir+"/known_hosts", "/root/.ssh/known_hosts"); err != nil {
+			log.Printf("[seed] warning: known_hosts: %v", err)
+		} else {
+			bridge.RunSetup([]string{"chmod 644 /root/.ssh/known_hosts"}) //nolint:errcheck
+		}
+	}
+
+	log.Printf("[seed] dev files injected (host=%s)", hostIP)
+	return nil
+}
+
 // repoName extracts the repository name from a clone URL.
 // e.g. "https://github.com/user/myrepo.git" → "myrepo"
 func repoName(url string) string {
@@ -713,12 +817,13 @@ func registerHandlers(mux *http.ServeMux, mgr *SessionManager, rootCtx context.C
 				RepoURL     string `json:"repo_url"`
 				Branch      string `json:"branch"`
 				GithubToken string `json:"github_token"`
+				DevMode     bool   `json:"dev_mode"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				http.Error(w, "bad request", http.StatusBadRequest)
 				return
 			}
-			sess, err := mgr.Create(rootCtx, body.RepoURL, body.Branch, body.GithubToken)
+			sess, err := mgr.Create(rootCtx, body.RepoURL, body.Branch, body.GithubToken, body.DevMode)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusServiceUnavailable)
 				return
@@ -747,12 +852,108 @@ func registerHandlers(mux *http.ServeMux, mgr *SessionManager, rootCtx context.C
 			return
 		}
 
+		if strings.HasSuffix(path, "/favorite") {
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if mgr.store == nil {
+				http.Error(w, "store not available", http.StatusServiceUnavailable)
+				return
+			}
+			id := strings.TrimSuffix(path, "/favorite")
+			sess, ok := mgr.Get(id)
+			if !ok {
+				http.Error(w, "session not found", http.StatusNotFound)
+				return
+			}
+			name := repoName(sess.RepoURL)
+			if name == "" {
+				name = sess.ID[:8]
+			}
+			fav := sessionstore.Favorite{
+				ID:        uuid.New().String(),
+				Name:      name,
+				RepoURL:   sess.RepoURL,
+				Branch:    sess.Branch,
+				CreatedAt: time.Now(),
+			}
+			if err := mgr.store.UpsertFavorite(fav); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, http.StatusCreated, fav)
+			return
+		}
+
 		if r.Method != http.MethodDelete {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		if err := mgr.Stop(path); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("/api/favorites", func(w http.ResponseWriter, r *http.Request) {
+		if mgr.store == nil {
+			http.Error(w, "store not available", http.StatusServiceUnavailable)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			favs, err := mgr.store.ListFavorites()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if favs == nil {
+				favs = []sessionstore.Favorite{}
+			}
+			writeJSON(w, http.StatusOK, favs)
+
+		case http.MethodPost:
+			var body struct {
+				Name    string `json:"name"`
+				RepoURL string `json:"repo_url"`
+				Branch  string `json:"branch"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			fav := sessionstore.Favorite{
+				ID:        uuid.New().String(),
+				Name:      body.Name,
+				RepoURL:   body.RepoURL,
+				Branch:    body.Branch,
+				CreatedAt: time.Now(),
+			}
+			if err := mgr.store.UpsertFavorite(fav); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, http.StatusCreated, fav)
+
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	mux.HandleFunc("/api/favorites/", func(w http.ResponseWriter, r *http.Request) {
+		if mgr.store == nil {
+			http.Error(w, "store not available", http.StatusServiceUnavailable)
+			return
+		}
+		if r.Method != http.MethodDelete {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/api/favorites/")
+		if err := mgr.store.DeleteFavorite(id); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)

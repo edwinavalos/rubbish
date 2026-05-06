@@ -60,6 +60,8 @@
       font-family: 'Menlo', 'Monaco', 'Consolas', monospace;
       font-size: 14px;
       min-height: 100vh;
+      display: flex;
+      flex-direction: column;
     }
 
     /* ── Header ── */
@@ -71,6 +73,7 @@
       height: 52px;
       border-bottom: 1px solid var(--border);
       background: var(--surface);
+      flex-shrink: 0;
     }
     .logo {
       font-size: 18px;
@@ -90,12 +93,136 @@
     }
     .btn-new:hover { background: var(--accent-hover); }
 
+    /* ── Body layout ── */
+    .body-layout {
+      display: flex;
+      flex: 1;
+      min-height: 0;
+    }
+
+    /* ── Sidebar ── */
+    aside {
+      width: 228px;
+      flex-shrink: 0;
+      border-right: 1px solid var(--border);
+      background: var(--surface);
+      display: flex;
+      flex-direction: column;
+      padding: 20px 0 0;
+    }
+
+    .sidebar-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .sidebar-title {
+      font-size: 11px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .btn-fav-add {
+      background: transparent;
+      border: none;
+      color: var(--text-dimmer);
+      font-size: 16px;
+      cursor: pointer;
+      padding: 0 2px;
+      line-height: 1;
+    }
+    .btn-fav-add:hover { color: var(--accent); }
+
+    .favorites-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px 0;
+    }
+
+    .fav-card {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px 8px 16px;
+      cursor: default;
+      border-radius: 0;
+      transition: background 0.1s;
+    }
+    .fav-card:hover { background: var(--bg); }
+
+    .fav-info {
+      flex: 1;
+      min-width: 0;
+    }
+    .fav-name {
+      font-size: 12px;
+      color: var(--text-secondary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .fav-meta {
+      font-size: 10px;
+      color: var(--text-dim);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      margin-top: 1px;
+    }
+    .fav-meta .branch-tag { color: var(--accent); }
+
+    .fav-actions {
+      display: flex;
+      gap: 4px;
+      flex-shrink: 0;
+      opacity: 0;
+      transition: opacity 0.1s;
+    }
+    .fav-card:hover .fav-actions { opacity: 1; }
+
+    .btn-fav-launch {
+      background: transparent;
+      color: var(--accent);
+      border: 1px solid var(--accent);
+      padding: 2px 7px;
+      border-radius: 3px;
+      font-family: inherit;
+      font-size: 10px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .btn-fav-launch:hover { background: var(--accent); color: #fff; }
+
+    .btn-fav-del {
+      background: transparent;
+      color: var(--text-dimmer);
+      border: 1px solid var(--border);
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-family: inherit;
+      font-size: 10px;
+      cursor: pointer;
+    }
+    .btn-fav-del:hover { color: var(--status-failed); border-color: var(--status-failed); }
+
+    .sidebar-empty {
+      padding: 24px 16px;
+      font-size: 11px;
+      color: var(--text-empty);
+      text-align: center;
+      line-height: 1.5;
+    }
+
     /* ── Main ── */
     main {
-      max-width: 860px;
-      margin: 32px auto;
-      padding: 0 24px;
+      flex: 1;
+      padding: 28px 32px;
+      min-width: 0;
+      overflow-y: auto;
     }
+
     .section-title {
       font-size: 12px;
       color: var(--text-dim);
@@ -127,7 +254,6 @@
     .status-dot.ready    { color: var(--status-ready); }
     .status-dot.failed   { color: var(--status-failed); }
     .status-dot.stopped  { color: var(--status-failed); }
-    /* all in-progress states pulse */
     .status-dot.provisioning,
     .status-dot.booting,
     .status-dot.waiting_ssh,
@@ -192,7 +318,7 @@
       width: 52px;
       text-align: right;
     }
-    .session-actions { display: flex; gap: 6px; flex-shrink: 0; }
+    .session-actions { display: flex; gap: 6px; flex-shrink: 0; align-items: center; }
 
     .btn-open {
       background: transparent;
@@ -231,6 +357,21 @@
       cursor: pointer;
     }
     .btn-start:hover { background: var(--status-ready); color: #fff; }
+
+    .btn-star {
+      background: transparent;
+      border: none;
+      color: var(--text-dimmer);
+      font-size: 14px;
+      cursor: pointer;
+      padding: 2px 4px;
+      border-radius: 3px;
+      line-height: 1;
+      transition: color 0.15s;
+    }
+    .btn-star:hover { color: #facc15; }
+    .btn-star.starred { color: #facc15; }
+    .btn-star.flash { color: var(--status-ready); }
 
     .empty-state {
       color: var(--text-empty);
@@ -354,12 +495,26 @@
   <button class="btn-new" id="btnNew">+ New Session</button>
 </header>
 
-<main>
-  <div class="section-title" id="sectionTitle">Sessions</div>
-  <div class="sessions-list" id="sessionsList">
-    <div class="empty-state">No active sessions.</div>
-  </div>
-</main>
+<div class="body-layout">
+  <!-- Favorites sidebar -->
+  <aside>
+    <div class="sidebar-header">
+      <span class="sidebar-title">Favorites</span>
+      <button class="btn-fav-add" id="btnFavAdd" title="Add favorite">+</button>
+    </div>
+    <div class="favorites-list" id="favoritesList">
+      <div class="sidebar-empty">No favorites yet.<br>Star a session to save it.</div>
+    </div>
+  </aside>
+
+  <!-- Session list -->
+  <main>
+    <div class="section-title" id="sectionTitle">Sessions</div>
+    <div class="sessions-list" id="sessionsList">
+      <div class="empty-state">No active sessions.</div>
+    </div>
+  </main>
+</div>
 
 <!-- New Session Modal -->
 <div class="modal-backdrop" id="modalBackdrop">
@@ -373,6 +528,13 @@
       <label>Branch / Worktree <span style="color:var(--text-dimmer)">(optional)</span></label>
       <input type="text" id="inputBranch" placeholder="main">
       <div class="field-hint">Leave blank to clone the default branch.</div>
+    </div>
+
+    <div class="field" style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+      <input type="checkbox" id="inputDevMode" style="width:auto;accent-color:var(--accent);cursor:pointer;">
+      <label for="inputDevMode" style="text-transform:none;letter-spacing:0;font-size:12px;color:var(--text-muted);cursor:pointer;margin:0;">
+        Dev mode — inject Claude memories + deploy key
+      </label>
     </div>
 
     <div class="modal-status" id="modalStatus">
@@ -403,6 +565,68 @@
     failed:       'failed',
   };
 
+  // ── Favorites ─────────────────────────────────────────────────────────────
+
+  let favoritesById = {};
+
+  async function loadFavorites() {
+    try {
+      const res = await fetch('/api/favorites');
+      if (!res.ok) return;
+      const favs = await res.json();
+      favoritesById = {};
+      (favs || []).forEach(f => { favoritesById[f.id] = f; });
+      renderFavorites(favs);
+    } catch (e) { /* ignore */ }
+  }
+
+  function renderFavorites(favs) {
+    const list = $('favoritesList');
+    if (!favs || favs.length === 0) {
+      list.innerHTML = '<div class="sidebar-empty">No favorites yet.<br>Star a session to save it.</div>';
+      return;
+    }
+    list.innerHTML = favs.map(f => {
+      const repo = repoDisplay(f.repo_url);
+      const meta = repo
+        ? (f.branch ? `${repo} <span class="branch-tag">⎇ ${f.branch}</span>` : repo)
+        : '<span style="color:var(--text-placeholder)">no repo</span>';
+      return `
+        <div class="fav-card">
+          <div class="fav-info">
+            <div class="fav-name" title="${f.name}">${truncate(f.name, 22)}</div>
+            <div class="fav-meta">${meta}</div>
+          </div>
+          <div class="fav-actions">
+            <button class="btn-fav-launch" onclick="launchFromFavorite('${f.id}')">▶</button>
+            <button class="btn-fav-del" onclick="deleteFavorite('${f.id}')">✕</button>
+          </div>
+        </div>`;
+    }).join('');
+  }
+
+  async function deleteFavorite(id) {
+    try {
+      await fetch(`/api/favorites/${id}`, { method: 'DELETE' });
+    } catch (e) { /* ignore */ }
+    await loadFavorites();
+  }
+
+  async function starSession(sessionId, btn) {
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/favorite`, { method: 'POST' });
+      if (!res.ok) return;
+      btn.textContent = '★';
+      btn.classList.add('starred');
+      await loadFavorites();
+    } catch (e) { /* ignore */ }
+  }
+
+  function launchFromFavorite(id) {
+    const f = favoritesById[id];
+    if (f) openModal(f.repo_url, f.branch);
+  }
+
   // ── Session list polling ──────────────────────────────────────────────────
 
   let pollTimer = null;
@@ -410,6 +634,7 @@
 
   function startPolling() {
     loadSessions();
+    loadFavorites();
     pollTimer = setInterval(loadSessions, 2000);
   }
 
@@ -469,15 +694,23 @@
       const isDimmed = s.status === 'failed';
       const dotChar = s.status === 'ready' ? '●' : IN_PROGRESS_STATES.has(s.status) ? '○' : '✕';
       const shortId = s.id.split('-')[0];
+      const hasRepo = !!s.repo_url;
+
+      const starBtn = hasRepo
+        ? `<button class="btn-star" title="Save as favorite" onclick="starSession('${s.id}', this)">☆</button>`
+        : '';
+
       let actions;
       if (s.status === 'ready') {
         actions = `<a class="btn-open" href="/terminal/${s.id}">Open</a>
+           ${starBtn}
            <button class="btn-dismiss" data-id="${s.id}" onclick="dismissSession('${s.id}')">✕</button>`;
       } else if (s.status === 'stopped') {
         actions = `<button class="btn-start" onclick="startSession('${s.id}')">Start</button>
+           ${starBtn}
            <button class="btn-dismiss" data-id="${s.id}" onclick="dismissSession('${s.id}')">✕</button>`;
       } else {
-        actions = `<button class="btn-dismiss" data-id="${s.id}" onclick="dismissSession('${s.id}')">✕</button>`;
+        actions = `${starBtn}<button class="btn-dismiss" data-id="${s.id}" onclick="dismissSession('${s.id}')">✕</button>`;
       }
 
       const repo = repoDisplay(s.repo_url);
@@ -514,9 +747,10 @@
 
   // ── Modal ─────────────────────────────────────────────────────────────────
 
-  async function openModal() {
-    $('inputRepo').value = '';
-    $('inputBranch').value = '';
+  function openModal(prefillRepo, prefillBranch) {
+    $('inputRepo').value    = prefillRepo  || '';
+    $('inputBranch').value  = prefillBranch || '';
+    $('inputDevMode').checked = false;
     setModalStatus('', false);
     $('btnLaunch').disabled = false;
     $('modalBackdrop').classList.add('open');
@@ -540,6 +774,7 @@
   async function launchSession() {
     const repoUrl = $('inputRepo').value.trim();
     const branch  = $('inputBranch').value.trim();
+    const devMode = $('inputDevMode').checked;
 
     $('btnLaunch').disabled = true;
     setModalStatus('Starting VM…', true);
@@ -548,7 +783,7 @@
       const res = await fetch('/api/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ repo_url: repoUrl || null, branch: branch || null }),
+        body: JSON.stringify({ repo_url: repoUrl || null, branch: branch || null, dev_mode: devMode }),
       });
 
       if (!res.ok) {
@@ -581,7 +816,8 @@
 
   // ── Event listeners ───────────────────────────────────────────────────────
 
-  $('btnNew').addEventListener('click', openModal);
+  $('btnNew').addEventListener('click', () => openModal());
+  $('btnFavAdd').addEventListener('click', () => openModal());
   $('btnCancel').addEventListener('click', closeModal);
   $('btnLaunch').addEventListener('click', launchSession);
 
