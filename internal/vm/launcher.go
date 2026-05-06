@@ -47,7 +47,7 @@ type VM struct {
 //
 // Note: requires rubbish ALL=(root) NOPASSWD: /usr/bin/mount, /usr/bin/umount in sudoers
 // for InjectNetworkConfig to work.
-func Launch(ctx context.Context, slot int, rootfsPath string) (*VM, error) {
+func Launch(ctx context.Context, slot int, rootfsPath string, memMiB int64) (*VM, error) {
 	t := time.Now()
 
 	tap := SlotTAP(slot)
@@ -88,7 +88,7 @@ func Launch(ctx context.Context, slot int, rootfsPath string) (*VM, error) {
 		},
 		MachineCfg: models.MachineConfiguration{
 			VcpuCount:  firecracker.Int64(2),
-			MemSizeMib: firecracker.Int64(512),
+			MemSizeMib: firecracker.Int64(memMiB),
 		},
 	}
 

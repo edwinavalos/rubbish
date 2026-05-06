@@ -55,7 +55,7 @@ type fakeLauncher struct {
 	launchN   atomic.Int32
 }
 
-func (f *fakeLauncher) Launch(_ context.Context, _ int, _ string) (vmHandle, error) {
+func (f *fakeLauncher) Launch(_ context.Context, _ int, _ string, _ int64) (vmHandle, error) {
 	f.launchN.Add(1)
 	if f.launchErr != nil {
 		return nil, f.launchErr
@@ -107,7 +107,7 @@ func TestBoot_HappyPath(t *testing.T) {
 	runner := &fakeSetupRunner{}
 	mgr := newTestManager(snap, launcher, &fakeBridgeFactory{runner})
 
-	sess, err := mgr.Create(context.Background(), "", "", "")
+	sess, err := mgr.Create(context.Background(), "", "", "", false)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestBoot_SnapshotFailure(t *testing.T) {
 	launcher := &fakeLauncher{handle: &fakeVMHandle{}}
 	mgr := newTestManager(snap, launcher, &fakeBridgeFactory{&fakeSetupRunner{}})
 
-	sess, err := mgr.Create(context.Background(), "", "", "")
+	sess, err := mgr.Create(context.Background(), "", "", "", false)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestBoot_LaunchFailure(t *testing.T) {
 	launcher := &fakeLauncher{launchErr: errors.New("tap busy"), handle: &fakeVMHandle{}}
 	mgr := newTestManager(snap, launcher, &fakeBridgeFactory{&fakeSetupRunner{}})
 
-	sess, err := mgr.Create(context.Background(), "", "", "")
+	sess, err := mgr.Create(context.Background(), "", "", "", false)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestBoot_SSHTimeout(t *testing.T) {
 	launcher := &fakeLauncher{handle: handle}
 	mgr := newTestManager(snap, launcher, &fakeBridgeFactory{&fakeSetupRunner{}})
 
-	sess, err := mgr.Create(context.Background(), "", "", "")
+	sess, err := mgr.Create(context.Background(), "", "", "", false)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestStop_ReadySession(t *testing.T) {
 	launcher := &fakeLauncher{handle: handle}
 	mgr := newTestManager(snap, launcher, &fakeBridgeFactory{&fakeSetupRunner{}})
 
-	sess, _ := mgr.Create(context.Background(), "", "", "")
+	sess, _ := mgr.Create(context.Background(), "", "", "", false)
 	waitState(t, mgr, sess.ID, session.StateReady, 3*time.Second)
 
 	if err := mgr.Stop(sess.ID); err != nil {
@@ -220,7 +220,7 @@ func TestStop_AlreadyStopped(t *testing.T) {
 	launcher := &fakeLauncher{handle: handle}
 	mgr := newTestManager(snap, launcher, &fakeBridgeFactory{&fakeSetupRunner{}})
 
-	sess, _ := mgr.Create(context.Background(), "", "", "")
+	sess, _ := mgr.Create(context.Background(), "", "", "", false)
 	waitState(t, mgr, sess.ID, session.StateReady, 3*time.Second)
 
 	mgr.Stop(sess.ID) //nolint:errcheck — first stop
@@ -243,7 +243,7 @@ func TestStop_FailedSession(t *testing.T) {
 	launcher := &fakeLauncher{handle: &fakeVMHandle{}}
 	mgr := newTestManager(snap, launcher, &fakeBridgeFactory{&fakeSetupRunner{}})
 
-	sess, _ := mgr.Create(context.Background(), "", "", "")
+	sess, _ := mgr.Create(context.Background(), "", "", "", false)
 	waitState(t, mgr, sess.ID, session.StateFailed, 3*time.Second)
 
 	// Stop on a failed session should not panic and should clean up.
@@ -260,7 +260,7 @@ func TestStopAll(t *testing.T) {
 
 	ids := make([]string, 3)
 	for i := range ids {
-		sess, err := mgr.Create(context.Background(), "", "", "")
+		sess, err := mgr.Create(context.Background(), "", "", "", false)
 		if err != nil {
 			t.Fatalf("Create %d: %v", i, err)
 		}

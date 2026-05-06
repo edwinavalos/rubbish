@@ -65,7 +65,7 @@ func TestBoot_InjectsClaudeToken(t *testing.T) {
 		store,
 	)
 
-	sess, err := mgr.Create(context.Background(), "", "", "")
+	sess, err := mgr.Create(context.Background(), "", "", "", false)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestBoot_SkipsInjectionWhenNoToken(t *testing.T) {
 		store,
 	)
 
-	sess, _ := mgr.Create(context.Background(), "", "", "")
+	sess, _ := mgr.Create(context.Background(), "", "", "", false)
 	waitState(t, mgr, sess.ID, session.StateReady, 3*time.Second)
 
 	for _, cmd := range runner.allCmds() {
@@ -204,7 +204,7 @@ func TestBoot_UsesProfileGitHubToken(t *testing.T) {
 		store,
 	)
 
-	sess, err := mgr.Create(context.Background(), "https://github.com/example/repo", "", "")
+	sess, err := mgr.Create(context.Background(), "https://github.com/example/repo", "", "", false)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

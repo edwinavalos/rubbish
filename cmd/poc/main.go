@@ -46,7 +46,7 @@ type snapshotter interface {
 }
 
 type vmLauncher interface {
-	Launch(ctx context.Context, slot int, rootfsPath string) (vmHandle, error)
+	Launch(ctx context.Context, slot int, rootfsPath string, memMiB int64) (vmHandle, error)
 }
 
 type vmHandle interface {
@@ -74,8 +74,8 @@ func (r *realSnapshotter) InjectNetworkConfig(device, ip, gateway string) error 
 
 type realVMLauncher struct{}
 
-func (realVMLauncher) Launch(ctx context.Context, slot int, rootfsPath string) (vmHandle, error) {
-	return vm.Launch(ctx, slot, rootfsPath)
+func (realVMLauncher) Launch(ctx context.Context, slot int, rootfsPath string, memMiB int64) (vmHandle, error) {
+	return vm.Launch(ctx, slot, rootfsPath, memMiB)
 }
 
 type realBridgeFactory struct{ signer ssh.Signer }
@@ -277,7 +277,11 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		log.Printf("[session %s] transition error: %v", sess.ID[:8], err)
 		return
 	}
-	v, err := m.launcher.Launch(ctx, sess.Slot, device)
+	memMiB := int64(512)
+	if sess.DevMode {
+		memMiB = 2048
+	}
+	v, err := m.launcher.Launch(ctx, sess.Slot, device, memMiB)
 	if err != nil {
 		m.snap.DeleteSnapshot(sess.ID) //nolint:errcheck
 		fail(fmt.Errorf("launch vm: %w", err))
