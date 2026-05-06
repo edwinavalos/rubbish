@@ -612,22 +612,25 @@ func normalizeRepoURL(rawURL string) string {
 
 const devSeedDir = "/opt/rubbish/dev-seed"
 
-// seedDevFiles injects developer context into a VM via SSH commands:
-//   - Claude Code global CLAUDE.md + memory files
-//   - Project memory (remapped to the VM clone path)
-//   - Deploy SSH key + SSH config + known_hosts for passwordless deploy to host
+// nfsBase is the host path exported via NFS for shared Claude memory.
+const nfsBase = "/opt/rubbish/claude-shared"
+
+// seedDevFiles injects developer context into a VM:
+//   - Global CLAUDE.md — base64-injected (static, no sync needed)
+//   - Global memory + project memory — NFS-mounted so all dev sessions share
+//     live read/write access to the same files on the host
+//   - Deploy SSH key + SSH config + known_hosts — base64-injected
 func seedDevFiles(bridge setupRunner) error {
-	const hostIP = "192.168.1.35"
+	const (
+		hostIP         = "192.168.1.35"
+		nfsGlobalMem   = nfsBase + "/memory"
+		nfsProjectMem  = nfsBase + "/projects/-root-workspace-rubbish/memory"
+		vmGlobalMem    = "/root/.claude/memory"
+		vmProjectMem   = "/root/.claude/projects/-root-workspace-rubbish/memory"
+		nfsMountOpts   = "vers=4,noatime,soft"
+	)
 
-	if err := bridge.RunSetup([]string{
-		"mkdir -p /root/.claude/memory",
-		"mkdir -p /root/.claude/projects/-root-workspace-rubbish/memory",
-		"mkdir -p /root/.ssh",
-	}); err != nil {
-		return fmt.Errorf("seed mkdirs: %w", err)
-	}
-
-	// injectFile base64-encodes a host file and decodes it inside the VM.
+	// injectFile base64-encodes a host file and writes it into the VM.
 	injectFile := func(srcPath, dstPath string) error {
 		data, err := os.ReadFile(srcPath)
 		if err != nil {
@@ -638,33 +641,29 @@ func seedDevFiles(bridge setupRunner) error {
 		return bridge.RunSetup([]string{cmd})
 	}
 
-	// injectDir injects every .md file from a host dir into a VM dir.
-	injectDir := func(srcDir, dstDir string) error {
-		entries, err := os.ReadDir(srcDir)
-		if err != nil {
-			return fmt.Errorf("read dir %s: %w", srcDir, err)
-		}
-		for _, e := range entries {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
-				continue
-			}
-			if err := injectFile(srcDir+"/"+e.Name(), dstDir+"/"+e.Name()); err != nil {
-				return err
-			}
-		}
-		return nil
+	// Create directory structure.
+	if err := bridge.RunSetup([]string{
+		"mkdir -p /root/.claude",
+		"mkdir -p " + vmGlobalMem,
+		"mkdir -p " + vmProjectMem,
+		"mkdir -p /root/.ssh",
+	}); err != nil {
+		return fmt.Errorf("seed mkdirs: %w", err)
 	}
 
-	// Claude Code context (non-fatal — log and continue)
+	// CLAUDE.md — static, base64-injected (does not need live sync).
 	if err := injectFile(devSeedDir+"/claude/CLAUDE.md", "/root/.claude/CLAUDE.md"); err != nil {
 		log.Printf("[seed] warning: CLAUDE.md: %v", err)
 	}
-	if err := injectDir(devSeedDir+"/claude/memory", "/root/.claude/memory"); err != nil {
-		log.Printf("[seed] warning: global memory: %v", err)
+
+	// Memory dirs — NFS-mounted for live shared read/write across all dev sessions.
+	if err := bridge.RunSetup([]string{
+		fmt.Sprintf("mount -t nfs %s:%s %s -o %s", hostIP, nfsGlobalMem, vmGlobalMem, nfsMountOpts),
+		fmt.Sprintf("mount -t nfs %s:%s %s -o %s", hostIP, nfsProjectMem, vmProjectMem, nfsMountOpts),
+	}); err != nil {
+		return fmt.Errorf("nfs mount: %w", err)
 	}
-	if err := injectDir(devSeedDir+"/claude/project-memory", "/root/.claude/projects/-root-workspace-rubbish/memory"); err != nil {
-		log.Printf("[seed] warning: project memory: %v", err)
-	}
+	log.Printf("[seed] NFS memory mounts established (host=%s)", hostIP)
 
 	// Deploy SSH key (fatal — without it the VM can't deploy)
 	if err := injectFile(devSeedDir+"/id_deploy", "/root/.ssh/id_deploy"); err != nil {
