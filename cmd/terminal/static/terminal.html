@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>rubbish › terminal</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    /* ── Color tokens (dark default) ── */
+    :root {
+      --bg:             #0f0f0f;
+      --surface:        #0f0f0f;
+      --border:         #1a1a1a;
+      --text-primary:   #e0e0e0;
+      --text-muted:     #6b7280;
+      --text-dim:       #9ca3af;
+      --text-sep:       #2a2a2a;
+      --accent:         #7c3aed;
+      --link:           #4b5563;
+    }
+
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg:             #f3f4f6;
+        --surface:        #ffffff;
+        --border:         #e5e7eb;
+        --text-primary:   #111827;
+        --text-muted:     #6b7280;
+        --text-dim:       #9ca3af;
+        --text-sep:       #d1d5db;
+        --accent:         #7c3aed;
+        --link:           #9ca3af;
+      }
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      background: var(--bg);
+      color: var(--text-primary);
+      font-family: 'Menlo', 'Monaco', 'Consolas', monospace;
+      overflow: hidden;
+    }
+
+    /* ── Top bar ── */
+    #topbar {
+      height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      font-size: 12px;
+    }
+
+    #topbar .title { color: var(--text-muted); }
+    #topbar .title .logo { color: var(--accent); font-weight: 700; }
+    #topbar .title .sep { margin: 0 6px; color: var(--text-sep); }
+    #topbar .title .session-id { color: var(--text-dim); }
+
+    #topbar a { color: var(--link); text-decoration: none; font-size: 12px; }
+    #topbar a:hover { color: var(--accent); }
+
+    /* ── Terminal container ── */
+    #terminal-wrapper {
+      position: absolute;
+      top: 32px;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      padding: 4px;
+    }
+
+    #terminal { width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+
+<div id="topbar">
+  <div class="title">
+    <span class="logo">rubbish</span>
+    <span class="sep">›</span>
+    <span class="session-id" id="sessionLabel">—</span>
+  </div>
+  <a href="/">← Sessions</a>
+</div>
+
+<div id="terminal-wrapper">
+  <div id="terminal"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+<script>
+  const id = location.pathname.split('/').filter(Boolean).pop();
+  document.getElementById('sessionLabel').textContent = id || 'unknown';
+  document.title = `rubbish › ${id || 'terminal'}`;
+
+  // ── Detect color scheme and pick xterm theme ───────────────────────────────
+  const darkTheme = {
+    background:         '#0f0f0f',
+    foreground:         '#e0e0e0',
+    cursor:             '#7c3aed',
+    cursorAccent:       '#0f0f0f',
+    selectionBackground:'#7c3aed44',
+    black:   '#1a1a1a', brightBlack:   '#4b5563',
+    red:     '#ef4444', brightRed:     '#f87171',
+    green:   '#22c55e', brightGreen:   '#4ade80',
+    yellow:  '#facc15', brightYellow:  '#fde047',
+    blue:    '#3b82f6', brightBlue:    '#60a5fa',
+    magenta: '#a855f7', brightMagenta: '#c084fc',
+    cyan:    '#06b6d4', brightCyan:    '#22d3ee',
+    white:   '#e5e7eb', brightWhite:   '#f9fafb',
+  };
+
+  const lightTheme = {
+    background:         '#ffffff',
+    foreground:         '#111827',
+    cursor:             '#7c3aed',
+    cursorAccent:       '#ffffff',
+    selectionBackground:'#7c3aed33',
+    black:   '#1f2937', brightBlack:   '#6b7280',
+    red:     '#dc2626', brightRed:     '#ef4444',
+    green:   '#16a34a', brightGreen:   '#22c55e',
+    yellow:  '#d97706', brightYellow:  '#f59e0b',
+    blue:    '#2563eb', brightBlue:    '#3b82f6',
+    magenta: '#7c3aed', brightMagenta: '#a855f7',
+    cyan:    '#0891b2', brightCyan:    '#06b6d4',
+    white:   '#f3f4f6', brightWhite:   '#ffffff',
+  };
+
+  const prefersLight = window.matchMedia('(prefers-color-scheme: light)').matches;
+  const xtermTheme   = prefersLight ? lightTheme : darkTheme;
+
+  // Keep xterm background in sync with the page bg when scheme changes
+  document.querySelector('.xterm-viewport') && (document.querySelector('.xterm-viewport').style.background = xtermTheme.background);
+
+  // ── Terminal setup ─────────────────────────────────────────────────────────
+  const term = new Terminal({
+    cursorBlink: true,
+    fontSize: 14,
+    fontFamily: "'Menlo', 'Monaco', 'Consolas', monospace",
+    theme: xtermTheme,
+    allowProposedApi: true,
+  });
+
+  const fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(document.getElementById('terminal'));
+  fitAddon.fit();
+  term.focus();
+
+  // Sync xterm viewport background (xterm injects it after open())
+  const viewport = document.querySelector('.xterm-viewport');
+  if (viewport) viewport.style.background = xtermTheme.background;
+
+  // If the user changes their OS theme mid-session, update everything
+  window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', e => {
+    const t = e.matches ? lightTheme : darkTheme;
+    term.options.theme = t;
+    const vp = document.querySelector('.xterm-viewport');
+    if (vp) vp.style.background = t.background;
+  });
+
+  // ── WebSocket ──────────────────────────────────────────────────────────────
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/ws/${id}`);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => { sendResize(); };
+
+  ws.onmessage = e => { term.write(new Uint8Array(e.data)); };
+
+  ws.onclose = () => {
+    term.write('\r\n\x1b[31m[Connection closed]\x1b[0m\r\n');
+  };
+
+  ws.onerror = () => {
+    term.write('\r\n\x1b[31m[WebSocket error — connection failed]\x1b[0m\r\n');
+  };
+
+  // ── Input ──────────────────────────────────────────────────────────────────
+  term.onData(data => {
+    if (ws.readyState === WebSocket.OPEN) ws.send(data);
+  });
+
+  // ── Resize ─────────────────────────────────────────────────────────────────
+  function sendResize() {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+    }
+  }
+
+  let resizeTimer;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => { fitAddon.fit(); sendResize(); }, 50);
+  });
+</script>
+</body>
+</html>

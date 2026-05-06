@@ -1,0 +1,14 @@
+[Unit]
+Description=Rubbish Terminal Proxy
+After=network.target rubbish-poc.service
+
+[Service]
+ExecStart=/usr/local/bin/rubbish-terminal --key /opt/rubbish/ssh/id_ed25519 --db /opt/rubbish/sessions.db
+Restart=always
+RestartSec=2
+StandardOutput=append:/var/log/rubbish-terminal.log
+StandardError=append:/var/log/rubbish-terminal.log
+User=root
+
+[Install]
+WantedBy=multi-user.target

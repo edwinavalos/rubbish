@@ -148,6 +148,28 @@ func (s *Store) ListFavorites() ([]Favorite, error) {
 	return out, rows.Err()
 }
 
+// Get returns a single session row by ID. Returns false if not found.
+func (s *Store) Get(id string) (Row, bool, error) {
+	var r Row
+	var devMode int
+	var createdAt, updatedAt string
+	err := s.db.QueryRow(`
+		SELECT id, slot, status, repo_url, branch, error_msg, dev_mode, created_at, updated_at
+		FROM sessions WHERE id = ?`, id).Scan(
+		&r.ID, &r.Slot, &r.Status, &r.RepoURL, &r.Branch, &r.ErrorMsg, &devMode, &createdAt, &updatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return Row{}, false, nil
+	}
+	if err != nil {
+		return Row{}, false, err
+	}
+	r.DevMode = devMode != 0
+	r.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	r.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+	return r, true, nil
+}
+
 // List returns all session rows ordered by created_at ascending.
 func (s *Store) List() ([]Row, error) {
 	rows, err := s.db.Query(`

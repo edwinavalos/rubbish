@@ -31,9 +31,6 @@ import (
 //go:embed static/index.html
 var indexHTML []byte
 
-//go:embed static/terminal.html
-var terminalHTML []byte
-
 //go:embed static/profile.html
 var profileHTML []byte
 
@@ -710,19 +707,6 @@ func repoName(url string) string {
 	return url[idx+1:]
 }
 
-// sessionStartCmd returns the shell command used to start the terminal session.
-// If a repo was cloned, it cds into the repo directory and launches claude;
-// falling back to a login shell if claude exits.
-func sessionStartCmd(repoURL string) string {
-	if repoURL != "" {
-		name := repoName(repoURL)
-		if name != "" {
-			return fmt.Sprintf("bash -l -c 'cd /root/workspace/%s 2>/dev/null || cd /root/workspace; claude; exec bash -l'", name)
-		}
-	}
-	return "bash -l -c 'claude; exec bash -l'"
-}
-
 // ---- Credential helpers -----------------------------------------------------
 
 func loadSavedToken(path string) string {
@@ -805,11 +789,6 @@ func registerHandlers(mux *http.ServeMux, mgr *SessionManager, rootCtx context.C
 		}
 		w.Header().Set("Content-Type", "text/html")
 		w.Write(indexHTML)
-	})
-
-	mux.HandleFunc("/terminal/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		w.Write(terminalHTML)
 	})
 
 	mux.HandleFunc("/api/sessions", func(w http.ResponseWriter, r *http.Request) {
@@ -964,23 +943,6 @@ func registerHandlers(mux *http.ServeMux, mgr *SessionManager, rootCtx context.C
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	mux.HandleFunc("/ws/", func(w http.ResponseWriter, r *http.Request) {
-		id := strings.TrimPrefix(r.URL.Path, "/ws/")
-		sess, ok := mgr.Get(id)
-		if !ok {
-			http.Error(w, "session not found", http.StatusNotFound)
-			return
-		}
-		if sess.SessionStatus() != session.StateReady {
-			http.Error(w, fmt.Sprintf("session not ready (status: %s)", sess.SessionStatus()), http.StatusServiceUnavailable)
-			return
-		}
-		if b, ok := sess.bridge.(*terminal.Bridge); ok {
-			b.ServeWS(w, r, sessionStartCmd(sess.RepoURL))
-		} else {
-			http.Error(w, "terminal not available", http.StatusInternalServerError)
-		}
-	})
 }
 
 // ---- main -------------------------------------------------------------------
