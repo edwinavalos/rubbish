@@ -78,7 +78,7 @@ func (realVMLauncher) Launch(ctx context.Context, slot int, rootfsPath string, m
 type realBridgeFactory struct{ signer ssh.Signer }
 
 func (r *realBridgeFactory) NewBridge(addr string, _ ssh.Signer) setupRunner {
-	return terminal.NewBridge(addr, r.signer)
+	return terminal.NewBridge(addr, "root", r.signer)
 }
 
 // ---- Session ----------------------------------------------------------------
@@ -357,6 +357,32 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		}
 	}
 
+	// Create the claude user so the terminal can connect as a non-root user.
+	// Claude Code refuses --dangerously-skip-permissions when running as root.
+	pubKeyB64 := base64.StdEncoding.EncodeToString(ssh.MarshalAuthorizedKey(m.signer.PublicKey()))
+	if err := bridge.RunSetup([]string{
+		"adduser -D -s /bin/bash -h /home/claude claude 2>/dev/null || true",
+		"passwd -u claude 2>/dev/null || true",
+		"mkdir -p /home/claude/.ssh",
+		"echo " + pubKeyB64 + " | base64 -d > /home/claude/.ssh/authorized_keys",
+		"chmod 700 /home/claude/.ssh",
+		"chmod 600 /home/claude/.ssh/authorized_keys",
+		"chown -R claude:claude /home/claude",
+		"chmod 755 /root",
+		"chown -R claude:claude /root/workspace 2>/dev/null || true",
+	}); err != nil {
+		log.Printf("[session %s] warning: create claude user: %v", sess.ID[:8], err)
+	}
+	// Install sudo and grant claude NOPASSWD — non-fatal since apk needs network.
+	if err := bridge.RunSetup([]string{
+		"apk add --quiet --no-progress sudo",
+		"mkdir -p /etc/sudoers.d",
+		"echo 'claude ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/claude",
+		"chmod 440 /etc/sudoers.d/claude",
+	}); err != nil {
+		log.Printf("[session %s] warning: sudo setup: %v", sess.ID[:8], err)
+	}
+
 	// Inject profile credentials into the VM environment.
 	if m.prof != nil {
 		if p, err := m.prof.Load(); err == nil && p.ClaudeOAuthToken != "" {
@@ -364,14 +390,24 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 				"mkdir -p /etc/profile.d",
 				fmt.Sprintf("printf 'export CLAUDE_CODE_OAUTH_TOKEN=%s\\n' > /etc/profile.d/rubbish-credentials.sh", p.ClaudeOAuthToken),
 				"chmod 600 /etc/profile.d/rubbish-credentials.sh",
-				// Mark Claude onboarding complete so the token is used without a login prompt.
-				`printf '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.29"}\n' > /root/.claude.json`,
-				"chmod 600 /root/.claude.json",
+				// Write .claude.json to claude's home — terminal connects as claude, not root.
+				`printf '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.29"}\n' > /home/claude/.claude.json`,
+				"chown claude:claude /home/claude/.claude.json",
+				"chmod 600 /home/claude/.claude.json",
 			}
 			if err := bridge.RunSetup(cmds); err != nil {
 				log.Printf("[session %s] warning: inject credentials: %v", sess.ID[:8], err)
 			}
 		}
+	}
+
+	// Copy git credentials to claude's home so git works in the terminal.
+	if err := bridge.RunSetup([]string{
+		"cp /root/.gitconfig /home/claude/.gitconfig 2>/dev/null || true",
+		"cp /root/.git-credentials /home/claude/.git-credentials 2>/dev/null || true",
+		"chown claude:claude /home/claude/.gitconfig /home/claude/.git-credentials 2>/dev/null || true",
+	}); err != nil {
+		log.Printf("[session %s] warning: copy git credentials to claude: %v", sess.ID[:8], err)
 	}
 
 	// 6. Dev seed (optional)
@@ -621,12 +657,14 @@ const nfsBase = "/opt/rubbish/claude-shared"
 //   - Deploy SSH key + SSH config + known_hosts — base64-injected
 func seedDevFiles(bridge setupRunner) error {
 	const (
-		hostIP         = "192.168.1.35"
-		nfsGlobalMem  = nfsBase + "/memory"
-		nfsProjects   = nfsBase + "/projects"
-		vmGlobalMem   = "/root/.claude/memory"
-		vmProjects    = "/root/.claude/projects"
-		nfsMountOpts  = "vers=4,noatime,soft"
+		hostIP       = "192.168.1.35"
+		nfsGlobalMem = nfsBase + "/memory"
+		nfsProjects  = nfsBase + "/projects"
+		vmHome       = "/home/claude"
+		vmGlobalMem  = vmHome + "/.claude/memory"
+		vmProjects   = vmHome + "/.claude/projects"
+		vmSSHDir     = vmHome + "/.ssh"
+		nfsMountOpts = "vers=4,noatime,soft"
 	)
 
 	// injectFile base64-encodes a host file and writes it into the VM.
@@ -640,18 +678,18 @@ func seedDevFiles(bridge setupRunner) error {
 		return bridge.RunSetup([]string{cmd})
 	}
 
-	// Create directory structure.
+	// Create directory structure under claude's home.
 	if err := bridge.RunSetup([]string{
-		"mkdir -p /root/.claude",
+		"mkdir -p " + vmHome + "/.claude",
 		"mkdir -p " + vmGlobalMem,
 		"mkdir -p " + vmProjects,
-		"mkdir -p /root/.ssh",
+		"mkdir -p " + vmSSHDir,
 	}); err != nil {
 		return fmt.Errorf("seed mkdirs: %w", err)
 	}
 
 	// CLAUDE.md — static, base64-injected (does not need live sync).
-	if err := injectFile(devSeedDir+"/claude/CLAUDE.md", "/root/.claude/CLAUDE.md"); err != nil {
+	if err := injectFile(devSeedDir+"/claude/CLAUDE.md", vmHome+"/.claude/CLAUDE.md"); err != nil {
 		log.Printf("[seed] warning: CLAUDE.md: %v", err)
 	}
 
@@ -665,18 +703,20 @@ func seedDevFiles(bridge setupRunner) error {
 	log.Printf("[seed] NFS memory mounts established (host=%s)", hostIP)
 
 	// Deploy SSH key (fatal — without it the VM can't deploy)
-	if err := injectFile(devSeedDir+"/id_deploy", "/root/.ssh/id_deploy"); err != nil {
+	if err := injectFile(devSeedDir+"/id_deploy", vmSSHDir+"/id_deploy"); err != nil {
 		return fmt.Errorf("inject deploy key: %w", err)
 	}
-	if err := bridge.RunSetup([]string{"chmod 600 /root/.ssh/id_deploy"}); err != nil {
+	if err := bridge.RunSetup([]string{"chmod 600 " + vmSSHDir + "/id_deploy"}); err != nil {
 		return fmt.Errorf("chmod deploy key: %w", err)
 	}
 
-	// SSH config so `ssh 192.168.1.35` uses the deploy key as claude
-	sshConfig := fmt.Sprintf("Host %s\n  User claude\n  IdentityFile /root/.ssh/id_deploy\n  StrictHostKeyChecking yes\n", hostIP)
+	// SSH config so `ssh 192.168.1.35` uses the deploy key as claude.
+	// base64-injected to avoid shell quoting issues with embedded newlines.
+	sshConfig := fmt.Sprintf("Host %s\n  User claude\n  IdentityFile %s/id_deploy\n  StrictHostKeyChecking yes\n", hostIP, vmSSHDir)
+	sshConfigB64 := base64.StdEncoding.EncodeToString([]byte(sshConfig))
 	if err := bridge.RunSetup([]string{
-		fmt.Sprintf("printf '%%s' %q > /root/.ssh/config", sshConfig),
-		"chmod 600 /root/.ssh/config",
+		"echo " + sshConfigB64 + " | base64 -d > " + vmSSHDir + "/config",
+		"chmod 600 " + vmSSHDir + "/config",
 	}); err != nil {
 		return fmt.Errorf("ssh config: %w", err)
 	}
@@ -684,11 +724,19 @@ func seedDevFiles(bridge setupRunner) error {
 	// Pre-trust the host fingerprint so first deploy doesn't prompt
 	knownHosts, err := os.ReadFile(devSeedDir + "/known_hosts")
 	if err == nil && len(knownHosts) > 0 {
-		if err := injectFile(devSeedDir+"/known_hosts", "/root/.ssh/known_hosts"); err != nil {
+		if err := injectFile(devSeedDir+"/known_hosts", vmSSHDir+"/known_hosts"); err != nil {
 			log.Printf("[seed] warning: known_hosts: %v", err)
 		} else {
-			bridge.RunSetup([]string{"chmod 644 /root/.ssh/known_hosts"}) //nolint:errcheck
+			bridge.RunSetup([]string{"chmod 644 " + vmSSHDir + "/known_hosts"}) //nolint:errcheck
 		}
+	}
+
+	// Fix ownership so claude user owns everything we wrote.
+	if err := bridge.RunSetup([]string{
+		"chown -R claude:claude " + vmHome + "/.claude",
+		"chown -R claude:claude " + vmSSHDir,
+	}); err != nil {
+		log.Printf("[seed] warning: chown: %v", err)
 	}
 
 	log.Printf("[seed] dev files injected (host=%s)", hostIP)

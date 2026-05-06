@@ -22,17 +22,18 @@ type resizeMsg struct {
 
 type Bridge struct {
 	host   string
+	user   string
 	sshKey ssh.Signer
 }
 
-func NewBridge(host string, signer ssh.Signer) *Bridge {
-	return &Bridge{host: host, sshKey: signer}
+func NewBridge(host, user string, signer ssh.Signer) *Bridge {
+	return &Bridge{host: host, user: user, sshKey: signer}
 }
 
 // RunSetup opens a non-PTY SSH session and runs each command sequentially.
 // Stops and returns an error on the first failure.
 func (b *Bridge) RunSetup(commands []string) error {
-	client, err := dialSSH(b.host, b.sshKey)
+	client, err := dialSSH(b.host, b.user, b.sshKey)
 	if err != nil {
 		return fmt.Errorf("ssh dial: %w", err)
 	}
@@ -62,7 +63,7 @@ func (b *Bridge) ServeWS(w http.ResponseWriter, r *http.Request, startCmd string
 
 	connStart := time.Now()
 
-	client, err := dialSSH(b.host, b.sshKey)
+	client, err := dialSSH(b.host, b.user, b.sshKey)
 	if err != nil {
 		ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("\r\nSSH dial failed: %v\r\n", err)))
 		return
@@ -147,9 +148,9 @@ func (b *Bridge) ServeWS(w http.ResponseWriter, r *http.Request, startCmd string
 	<-done
 }
 
-func dialSSH(host string, signer ssh.Signer) (*ssh.Client, error) {
+func dialSSH(host, user string, signer ssh.Signer) (*ssh.Client, error) {
 	cfg := &ssh.ClientConfig{
-		User:            "root",
+		User:            user,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         5 * time.Second,

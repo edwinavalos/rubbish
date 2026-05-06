@@ -69,7 +69,7 @@ func main() {
 		}
 
 		vmAddr := fmt.Sprintf("%s:%d", vm.SlotIP(row.Slot), vm.VMSSHPort)
-		bridge := terminal.NewBridge(vmAddr, signer)
+		bridge := terminal.NewBridge(vmAddr, "claude", signer)
 		bridge.ServeWS(w, r, sessionStartCmd(row.RepoURL))
 	})
 
@@ -83,10 +83,10 @@ func sessionStartCmd(repoURL string) string {
 	if repoURL != "" {
 		name := repoName(repoURL)
 		if name != "" {
-			return fmt.Sprintf("bash -l -c 'cd /root/workspace/%s 2>/dev/null || cd /root/workspace; claude; exec bash -l'", name)
+			return fmt.Sprintf("bash -l -c 'cd /root/workspace/%s 2>/dev/null || cd ~; claude --dangerously-skip-permissions; exec bash -l'", name)
 		}
 	}
-	return "bash -l -c 'claude; exec bash -l'"
+	return "bash -l -c 'claude --dangerously-skip-permissions; exec bash -l'"
 }
 
 func repoName(rawURL string) string {
