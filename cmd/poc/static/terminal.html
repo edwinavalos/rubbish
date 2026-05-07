@@ -65,6 +65,8 @@
     #topbar a { color: var(--link); text-decoration: none; font-size: 12px; }
     #topbar a:hover { color: var(--accent); }
 
+    #connStatus { font-size: 11px; color: var(--text-muted); margin-left: 8px; }
+
     /* ── Terminal container ── */
     #terminal-wrapper {
       position: absolute;
@@ -127,6 +129,7 @@
     <span class="logo">rubbish</span>
     <span class="sep">›</span>
     <span class="session-id" id="sessionLabel">—</span>
+    <span id="connStatus"></span>
   </div>
   <a href="/">← Sessions</a>
 </div>
@@ -217,7 +220,29 @@
 
   // ── WebSocket ──────────────────────────────────────────────────────────────
   let ws;
+  let autoReconnecting = false;
+  let reconnectAttempts = 0;
+  let reconnectTimer = null;
+  const RECONNECT_DELAYS = [300, 500, 800, 1200, 2000, 3000];
+  const MAX_RECONNECT_ATTEMPTS = 20;
+
   const reconnectOverlay = document.getElementById('reconnect-overlay');
+  const connStatus = document.getElementById('connStatus');
+
+  function setStatus(text) { if (connStatus) connStatus.textContent = text; }
+
+  function scheduleReconnect() {
+    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      autoReconnecting = false;
+      setStatus('');
+      reconnectOverlay.style.display = 'flex';
+      return;
+    }
+    const delay = RECONNECT_DELAYS[Math.min(reconnectAttempts, RECONNECT_DELAYS.length - 1)];
+    reconnectAttempts++;
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connect, delay);
+  }
 
   function connect() {
     reconnectOverlay.style.display = 'none';
@@ -225,16 +250,37 @@
     ws = new WebSocket(`${proto}://${location.host}/ws/${id}`);
     ws.binaryType = 'arraybuffer';
 
-    ws.onopen = () => { sendResize(); };
+    ws.onopen = () => {
+      autoReconnecting = false;
+      reconnectAttempts = 0;
+      setStatus('');
+      sendResize();
+    };
 
-    ws.onmessage = e => { term.write(new Uint8Array(e.data)); };
+    ws.onmessage = e => {
+      if (typeof e.data === 'string') {
+        try {
+          const msg = JSON.parse(e.data);
+          if (msg.type === 'reconnect') {
+            autoReconnecting = true;
+            setStatus('reconnecting…');
+            return;
+          }
+        } catch (_) {}
+        term.write(e.data);
+        return;
+      }
+      term.write(new Uint8Array(e.data));
+    };
 
     ws.onclose = () => {
+      if (autoReconnecting) { scheduleReconnect(); return; }
       term.write('\r\n\x1b[31m[Connection closed]\x1b[0m\r\n');
       reconnectOverlay.style.display = 'flex';
     };
 
     ws.onerror = () => {
+      if (autoReconnecting) return; // onclose handles the retry
       term.write('\r\n\x1b[31m[WebSocket error — connection failed]\x1b[0m\r\n');
       reconnectOverlay.style.display = 'flex';
     };

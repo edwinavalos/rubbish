@@ -68,26 +68,40 @@ func (b *Bridge) RunSetupCapture(commands []string, w io.Writer) error {
 	return nil
 }
 
+// Upgrade upgrades the HTTP connection to WebSocket and returns it. Use this
+// alongside Relay when the caller needs to register the connection with a hub
+// before the relay starts (e.g. for graceful-shutdown notification).
+func Upgrade(w http.ResponseWriter, r *http.Request) (*websocket.Conn, error) {
+	return upgrader.Upgrade(w, r, nil)
+}
+
+// Relay runs the terminal relay on an already-upgraded WebSocket connection,
+// blocking until the connection closes. ws is closed on return.
+func (b *Bridge) Relay(ws *websocket.Conn, startCmd string) {
+	defer ws.Close()
+	b.relay(ws, startCmd, time.Now())
+}
+
 func (b *Bridge) ServeWS(w http.ResponseWriter, r *http.Request, startCmd string) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer ws.Close()
+	b.Relay(ws, startCmd)
+}
 
-	connStart := time.Now()
-
+func (b *Bridge) relay(ws *websocket.Conn, startCmd string, connStart time.Time) {
 	client, err := dialSSH(b.host, b.user, b.sshKey)
 	if err != nil {
-		ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("\r\nSSH dial failed: %v\r\n", err)))
+		ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("\r\nSSH dial failed: %v\r\n", err))) //nolint:errcheck
 		return
 	}
 	defer client.Close()
 
 	session, err := client.NewSession()
 	if err != nil {
-		ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("\r\nSSH session failed: %v\r\n", err)))
+		ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("\r\nSSH session failed: %v\r\n", err))) //nolint:errcheck
 		return
 	}
 	defer session.Close()
@@ -98,7 +112,7 @@ func (b *Bridge) ServeWS(w http.ResponseWriter, r *http.Request, startCmd string
 		ssh.TTY_OP_OSPEED: 14400,
 	}
 	if err := session.RequestPty("xterm-256color", 40, 120, modes); err != nil {
-		ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("\r\nPTY request failed: %v\r\n", err)))
+		ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("\r\nPTY request failed: %v\r\n", err))) //nolint:errcheck
 		return
 	}
 
@@ -112,7 +126,7 @@ func (b *Bridge) ServeWS(w http.ResponseWriter, r *http.Request, startCmd string
 	}
 
 	if err := session.Start(startCmd); err != nil {
-		ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("\r\nShell failed: %v\r\n", err)))
+		ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("\r\nShell failed: %v\r\n", err))) //nolint:errcheck
 		return
 	}
 

@@ -1,23 +1,67 @@
 package main
 
 import (
+	"context"
 	_ "embed"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/edwinavalos/rubbish/internal/session"
 	"github.com/edwinavalos/rubbish/internal/sessionstore"
 	"github.com/edwinavalos/rubbish/internal/terminal"
 	"github.com/edwinavalos/rubbish/internal/vm"
+	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/ssh"
 )
 
 //go:embed static/terminal.html
 var terminalHTML []byte
+
+// connHub tracks active WebSocket connections so they can be notified before
+// a graceful shutdown, letting the browser auto-reconnect instead of showing
+// a "Connection lost" overlay.
+type connHub struct {
+	mu    sync.Mutex
+	conns map[*websocket.Conn]struct{}
+}
+
+func newConnHub() *connHub {
+	return &connHub{conns: make(map[*websocket.Conn]struct{})}
+}
+
+func (h *connHub) add(c *websocket.Conn) {
+	h.mu.Lock()
+	h.conns[c] = struct{}{}
+	h.mu.Unlock()
+}
+
+func (h *connHub) remove(c *websocket.Conn) {
+	h.mu.Lock()
+	delete(h.conns, c)
+	h.mu.Unlock()
+}
+
+// notifyReconnect sends {"type":"reconnect"} to every active connection and
+// then sends a WebSocket close frame. The browser treats this as a signal to
+// auto-reconnect silently rather than showing the "Connection lost" overlay.
+func (h *connHub) notifyReconnect() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	msg, _ := json.Marshal(map[string]string{"type": "reconnect"})
+	for c := range h.conns {
+		c.WriteMessage(websocket.TextMessage, msg)                                                              //nolint:errcheck
+		c.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "restart")) //nolint:errcheck
+	}
+}
 
 func main() {
 	keyPath := flag.String("key", "", "path to SSH private key for VM access")
@@ -44,11 +88,12 @@ func main() {
 	}
 	defer store.Close()
 
+	hub := newConnHub()
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/terminal/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		w.Write(terminalHTML)
+		w.Write(terminalHTML) //nolint:errcheck
 	})
 
 	mux.HandleFunc("/ws/", func(w http.ResponseWriter, r *http.Request) {
@@ -68,13 +113,38 @@ func main() {
 			return
 		}
 
+		ws, err := terminal.Upgrade(w, r)
+		if err != nil {
+			return
+		}
+		hub.add(ws)
+		defer hub.remove(ws)
+
 		vmAddr := fmt.Sprintf("%s:%d", vm.SlotIP(row.Slot), vm.VMSSHPort)
 		bridge := terminal.NewBridge(vmAddr, "claude", signer)
-		bridge.ServeWS(w, r, sessionStartCmd(row.RepoURL))
+		bridge.Relay(ws, sessionStartCmd(row.RepoURL))
 	})
 
+	srv := &http.Server{Addr: *addr, Handler: mux}
+
+	// Graceful shutdown: notify all active terminals to auto-reconnect before
+	// the process exits so deploys don't leave users with a dead browser tab.
+	go func() {
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
+		<-ch
+		log.Printf("shutdown signal — notifying active terminals to reconnect")
+		hub.notifyReconnect()
+		// Brief pause so the WebSocket messages are flushed before we stop
+		// accepting connections. The browser will retry during this window.
+		time.Sleep(300 * time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.Shutdown(ctx) //nolint:errcheck
+	}()
+
 	log.Printf("rubbish-terminal listening on %s", *addr)
-	if err := http.ListenAndServe(*addr, mux); err != nil {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("listen: %v", err)
 	}
 }
