@@ -13,16 +13,32 @@ import (
 // Resolved once at startup to avoid repeated syscalls.
 var deviceUID = strconv.Itoa(os.Getuid())
 
+// dmRunner abstracts dmsetup/blockdev calls for testability.
+type dmRunner interface {
+	run(name string, arg ...string) ([]byte, error)
+}
+
+type realDMRunner struct{}
+
+func (realDMRunner) run(name string, arg ...string) ([]byte, error) {
+	return exec.Command(name, arg...).CombinedOutput()
+}
+
 type SnapshotManager struct {
 	poolDevice   string
 	baseVolumeID int
 	idPath       string
+	dm           dmRunner
 	mu           sync.Mutex
 	nextVolumeID int
 	sessions     map[string]int // sessionID → volumeID
 }
 
 func NewSnapshotManager(poolDevice, idPath string) (*SnapshotManager, error) {
+	return newSnapshotManager(poolDevice, idPath, realDMRunner{})
+}
+
+func newSnapshotManager(poolDevice, idPath string, dm dmRunner) (*SnapshotManager, error) {
 	if _, err := os.Stat(poolDevice); err != nil {
 		return nil, fmt.Errorf("pool device %s not found: %w", poolDevice, err)
 	}
@@ -35,13 +51,72 @@ func NewSnapshotManager(poolDevice, idPath string) (*SnapshotManager, error) {
 		}
 	}
 
-	return &SnapshotManager{
+	sm := &SnapshotManager{
 		poolDevice:   poolDevice,
-		baseVolumeID: 0,
+		baseVolumeID: -1,
 		idPath:       idPath,
+		dm:           dm,
 		nextVolumeID: next,
 		sessions:     make(map[string]int),
-	}, nil
+	}
+
+	if err := sm.discoverState(); err != nil {
+		return nil, err
+	}
+	if sm.baseVolumeID < 0 {
+		return nil, fmt.Errorf("could not determine base volume ID from rubbish-base device")
+	}
+	return sm, nil
+}
+
+// discoverState reads rubbish-base's thin vol ID and rebuilds the sessions map
+// from any existing rubbish-session-* dm devices. Both are best-effort on
+// individual device reads; only the base vol ID is fatal.
+func (s *SnapshotManager) discoverState() error {
+	// Discover base vol ID from the live device table.
+	out, err := s.dm.run("sudo", "dmsetup", "table", "rubbish-base")
+	if err != nil {
+		return fmt.Errorf("dmsetup table rubbish-base: %s: %w", out, err)
+	}
+	// Table format: "0 <sectors> thin <pool-dev> <vol-id>"
+	fields := strings.Fields(string(out))
+	if len(fields) < 5 || fields[2] != "thin" {
+		return fmt.Errorf("unexpected rubbish-base table: %q", strings.TrimSpace(string(out)))
+	}
+	baseVolID, err := strconv.Atoi(fields[4])
+	if err != nil {
+		return fmt.Errorf("parse base vol ID from %q: %w", fields[4], err)
+	}
+	s.baseVolumeID = baseVolID
+
+	// Rebuild sessions map from existing rubbish-session-* devices so that
+	// DeleteSnapshot works correctly after a service restart.
+	lsOut, err := s.dm.run("sudo", "dmsetup", "ls")
+	if err != nil {
+		return nil // best-effort; missing sessions just means they can't be deleted
+	}
+	for _, line := range strings.Split(string(lsOut), "\n") {
+		devName := strings.Fields(line)
+		if len(devName) == 0 || !strings.HasPrefix(devName[0], "rubbish-session-") {
+			continue
+		}
+		name := devName[0]
+		sessionID := strings.TrimPrefix(name, "rubbish-session-")
+		tbl, err := s.dm.run("sudo", "dmsetup", "table", name)
+		if err != nil {
+			continue
+		}
+		tFields := strings.Fields(string(tbl))
+		if len(tFields) < 5 {
+			continue
+		}
+		volID, err := strconv.Atoi(tFields[4])
+		if err != nil {
+			continue
+		}
+		s.sessions[sessionID] = volID
+	}
+	return nil
 }
 
 func (s *SnapshotManager) CreateSnapshot(sessionID string) (string, error) {
@@ -56,23 +131,23 @@ func (s *SnapshotManager) CreateSnapshot(sessionID string) (string, error) {
 	s.mu.Unlock()
 
 	snapMsg := fmt.Sprintf("create_snap %d %d", volID, s.baseVolumeID)
-	if out, err := exec.Command("sudo", "dmsetup", "message", s.poolDevice, "0", snapMsg).CombinedOutput(); err != nil {
+	if out, err := s.dm.run("sudo", "dmsetup", "message", s.poolDevice, "0", snapMsg); err != nil {
 		return "", fmt.Errorf("dmsetup create_snap (vol %d): %s: %w", volID, out, err)
 	}
 
 	sectors, err := s.BaseSize()
 	if err != nil {
-		exec.Command("sudo", "dmsetup", "message", s.poolDevice, "0", fmt.Sprintf("delete %d", volID)).Run() //nolint:errcheck
+		s.dm.run("sudo", "dmsetup", "message", s.poolDevice, "0", fmt.Sprintf("delete %d", volID)) //nolint:errcheck
 		return "", fmt.Errorf("base size: %w", err)
 	}
 
 	devName := "rubbish-session-" + sessionID
 	// Remove any stale device with the same name (can linger after a rapid stop+restart
 	// because firecracker briefly holds an fd to the device after SIGTERM).
-	exec.Command("sudo", "dmsetup", "remove", devName).Run() //nolint:errcheck
+	s.dm.run("sudo", "dmsetup", "remove", devName) //nolint:errcheck
 	table := fmt.Sprintf("0 %d thin %s %d", sectors, s.poolDevice, volID)
-	if out, err := exec.Command("sudo", "dmsetup", "create", devName, "--uid", deviceUID, "--table", table).CombinedOutput(); err != nil {
-		exec.Command("sudo", "dmsetup", "message", s.poolDevice, "0", fmt.Sprintf("delete %d", volID)).Run() //nolint:errcheck
+	if out, err := s.dm.run("sudo", "dmsetup", "create", devName, "--uid", deviceUID, "--table", table); err != nil {
+		s.dm.run("sudo", "dmsetup", "message", s.poolDevice, "0", fmt.Sprintf("delete %d", volID)) //nolint:errcheck
 		return "", fmt.Errorf("dmsetup create %s: %s: %w", devName, out, err)
 	}
 
@@ -94,12 +169,12 @@ func (s *SnapshotManager) DeleteSnapshot(sessionID string) error {
 	devName := "rubbish-session-" + sessionID
 	var errs []string
 
-	if out, err := exec.Command("sudo", "dmsetup", "remove", devName).CombinedOutput(); err != nil {
+	if out, err := s.dm.run("sudo", "dmsetup", "remove", devName); err != nil {
 		errs = append(errs, fmt.Sprintf("dmsetup remove %s: %s: %v", devName, out, err))
 	}
 
 	delMsg := fmt.Sprintf("delete %d", volID)
-	if out, err := exec.Command("sudo", "dmsetup", "message", s.poolDevice, "0", delMsg).CombinedOutput(); err != nil {
+	if out, err := s.dm.run("sudo", "dmsetup", "message", s.poolDevice, "0", delMsg); err != nil {
 		errs = append(errs, fmt.Sprintf("dmsetup delete vol %d: %s: %v", volID, out, err))
 	}
 
@@ -114,7 +189,7 @@ func (s *SnapshotManager) DeleteSnapshot(sessionID string) error {
 }
 
 func (s *SnapshotManager) BaseSize() (int64, error) {
-	out, err := exec.Command("sudo", "blockdev", "--getsz", "/dev/mapper/rubbish-base").CombinedOutput()
+	out, err := s.dm.run("sudo", "blockdev", "--getsz", "/dev/mapper/rubbish-base")
 	if err != nil {
 		return 0, fmt.Errorf("blockdev --getsz: %s: %w", out, err)
 	}
