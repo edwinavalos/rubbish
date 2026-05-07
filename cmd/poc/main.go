@@ -372,6 +372,10 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 			"test -s /home/claude/.ssh/authorized_keys",
 			"chmod 700 /home/claude/.ssh",
 			"chmod 600 /home/claude/.ssh/authorized_keys",
+			// Set up user-owned npm prefix so claude can auto-update Claude Code without sudo.
+			"mkdir -p /home/claude/.npm-global/bin",
+			"grep -q npm-global /home/claude/.npmrc 2>/dev/null || echo 'prefix=/home/claude/.npm-global' > /home/claude/.npmrc",
+			"grep -q npm-global /home/claude/.profile 2>/dev/null || printf 'export PATH=/home/claude/.npm-global/bin:$PATH\\n' >> /home/claude/.profile",
 			"chown -R claude:claude /home/claude",
 			"chmod 755 /root",
 			"chown -R claude:claude /root/workspace 2>/dev/null || true",

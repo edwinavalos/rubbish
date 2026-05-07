@@ -55,15 +55,33 @@ iface eth0 inet static
     gateway 172.16.0.1
 EOF
 
-# Install packages inside chroot
+# Install packages and set up claude user inside chroot
 chroot "${MOUNT_DIR}" /bin/sh -c "
     apk update &&
-    apk add --no-cache openssh bash curl git nodejs npm &&
-    npm install -g @anthropic-ai/claude-code &&
-    cd \$(npm root -g)/@anthropic-ai/claude-code &&
+    apk add --no-cache openssh bash curl git nodejs npm sudo &&
+
+    # Create claude user (session setup does this too, but baking it in saves the apk install at boot)
+    adduser -D -s /bin/bash -h /home/claude claude &&
+    echo 'claude ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/claude &&
+    chmod 440 /etc/sudoers.d/claude &&
+
+    # Install claude-code into a claude-owned npm prefix so the user can auto-update
+    mkdir -p /home/claude/.npm-global &&
+    echo 'prefix=/home/claude/.npm-global' > /home/claude/.npmrc &&
+    npm install -g --prefix /home/claude/.npm-global @anthropic-ai/claude-code &&
+    cd /home/claude/.npm-global/lib/node_modules/@anthropic-ai/claude-code &&
     npm install --save-optional @anthropic-ai/claude-code-linux-x64-musl &&
     node install.cjs &&
     cd / &&
+
+    # System-wide symlink so /usr/local/bin/claude resolves for root and other users
+    ln -sf /home/claude/.npm-global/bin/claude /usr/local/bin/claude &&
+
+    # Seed .profile with PATH (session setup appends credentials on top of this)
+    printf 'export PATH=/home/claude/.npm-global/bin:\$PATH\n' > /home/claude/.profile &&
+
+    chown -R claude:claude /home/claude &&
+
     ssh-keygen -A &&
     passwd -d root &&
     mkdir -p /root/workspace
