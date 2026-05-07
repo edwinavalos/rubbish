@@ -37,7 +37,7 @@ func NewSnapshotManager(poolDevice, idPath string) (*SnapshotManager, error) {
 
 	return &SnapshotManager{
 		poolDevice:   poolDevice,
-		baseVolumeID: 1,
+		baseVolumeID: 0,
 		idPath:       idPath,
 		nextVolumeID: next,
 		sessions:     make(map[string]int),
@@ -114,7 +114,7 @@ func (s *SnapshotManager) DeleteSnapshot(sessionID string) error {
 }
 
 func (s *SnapshotManager) BaseSize() (int64, error) {
-	out, err := exec.Command("sudo", "blockdev", "--getsz", "/dev/mapper/rubbish-base-ro").CombinedOutput()
+	out, err := exec.Command("sudo", "blockdev", "--getsz", "/dev/mapper/rubbish-base").CombinedOutput()
 	if err != nil {
 		return 0, fmt.Errorf("blockdev --getsz: %s: %w", out, err)
 	}

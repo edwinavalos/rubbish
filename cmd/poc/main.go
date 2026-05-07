@@ -361,8 +361,12 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 	// Claude Code refuses --dangerously-skip-permissions when running as root.
 	if m.signer != nil {
 		log.Printf("[session %s] creating claude user", sess.ID[:8])
+		shortID := sess.ID[:8]
+		vmHostname := "rubbish-" + shortID
 		pubKey := strings.TrimRight(string(ssh.MarshalAuthorizedKey(m.signer.PublicKey())), "\n")
 		if err := bridge.RunSetup([]string{
+			"hostname " + vmHostname,
+			"echo " + vmHostname + " > /etc/hostname",
 			"adduser -D -s /bin/bash -h /home/claude claude 2>/dev/null || true",
 			"passwd -u claude 2>/dev/null || true",
 			"mkdir -p /home/claude/.ssh",
