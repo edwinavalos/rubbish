@@ -76,6 +76,48 @@
     }
 
     #terminal { width: 100%; height: 100%; }
+
+    /* ── Reconnect overlay ── */
+    #reconnect-overlay {
+      position: absolute;
+      top: 32px;
+      left: 0; right: 0; bottom: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, 0.55);
+      z-index: 10;
+    }
+
+    .reconnect-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      padding: 24px 32px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+
+    .reconnect-msg {
+      color: var(--text-muted);
+      font-size: 13px;
+    }
+
+    .reconnect-card button {
+      padding: 8px 22px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: 13px;
+      cursor: pointer;
+      letter-spacing: 0.01em;
+    }
+
+    .reconnect-card button:hover { opacity: 0.85; }
   </style>
 </head>
 <body>
@@ -87,6 +129,13 @@
     <span class="session-id" id="sessionLabel">—</span>
   </div>
   <a id="backLink" href="/">← Sessions</a>
+</div>
+
+<div id="reconnect-overlay">
+  <div class="reconnect-card">
+    <span class="reconnect-msg">Connection lost</span>
+    <button onclick="connect()">Resume</button>
+  </div>
 </div>
 
 <div id="terminal-wrapper">
@@ -168,30 +217,38 @@
   });
 
   // ── WebSocket ──────────────────────────────────────────────────────────────
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(`${proto}://${location.host}/ws/${id}`);
-  ws.binaryType = 'arraybuffer';
+  let ws;
+  const reconnectOverlay = document.getElementById('reconnect-overlay');
 
-  ws.onopen = () => { sendResize(); };
+  function connect() {
+    reconnectOverlay.style.display = 'none';
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}/ws/${id}`);
+    ws.binaryType = 'arraybuffer';
 
-  ws.onmessage = e => { term.write(new Uint8Array(e.data)); };
+    ws.onopen = () => { sendResize(); };
 
-  ws.onclose = () => {
-    term.write('\r\n\x1b[31m[Connection closed]\x1b[0m\r\n');
-  };
+    ws.onmessage = e => { term.write(new Uint8Array(e.data)); };
 
-  ws.onerror = () => {
-    term.write('\r\n\x1b[31m[WebSocket error — connection failed]\x1b[0m\r\n');
-  };
+    ws.onclose = () => {
+      term.write('\r\n\x1b[31m[Connection closed]\x1b[0m\r\n');
+      reconnectOverlay.style.display = 'flex';
+    };
+
+    ws.onerror = () => {
+      term.write('\r\n\x1b[31m[WebSocket error — connection failed]\x1b[0m\r\n');
+      reconnectOverlay.style.display = 'flex';
+    };
+  }
 
   // ── Input ──────────────────────────────────────────────────────────────────
   term.onData(data => {
-    if (ws.readyState === WebSocket.OPEN) ws.send(data);
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
   });
 
   // ── Resize ─────────────────────────────────────────────────────────────────
   function sendResize() {
-    if (ws.readyState === WebSocket.OPEN) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
     }
   }
@@ -201,6 +258,8 @@
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => { fitAddon.fit(); sendResize(); }, 50);
   });
+
+  connect();
 </script>
 </body>
 </html>
