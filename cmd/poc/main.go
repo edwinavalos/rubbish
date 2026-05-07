@@ -376,6 +376,9 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 			"mkdir -p /home/claude/.npm-global/bin",
 			"grep -q npm-global /home/claude/.npmrc 2>/dev/null || echo 'prefix=/home/claude/.npm-global' > /home/claude/.npmrc",
 			"grep -q npm-global /home/claude/.profile 2>/dev/null || printf 'export PATH=/home/claude/.npm-global/bin:$PATH\\n' >> /home/claude/.profile",
+			// Seed tmux config: no status bar, mouse scrollback, prefix disabled so
+			// users can't create panes/windows.
+			"test -f /home/claude/.tmux.conf || printf 'set -g status off\\nset -g mouse on\\nset -g history-limit 50000\\nset -g prefix None\\nset -g escape-time 0\\n' > /home/claude/.tmux.conf",
 			"chown -R claude:claude /home/claude",
 			"chmod 755 /root",
 			"chown -R claude:claude /root/workspace 2>/dev/null || true",

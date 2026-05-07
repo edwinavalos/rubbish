@@ -156,9 +156,10 @@ func sessionStartCmd(repoURL string) string {
 			inner = fmt.Sprintf("cd /root/workspace/%s 2>/dev/null || cd ~; %s", name, inner)
 		}
 	}
-	// screen -D -R: reattach to existing session (detaching any other client) or
-	// create a new one. This keeps claude running through WebSocket disconnects.
-	return fmt.Sprintf("bash -l -c 'screen -D -R -S rubbish bash -l -c %q'", inner)
+	// tmux new-session -A: attach to existing session or create a new one.
+	// Keeps claude running through WebSocket disconnects; mouse scrollback is
+	// handled by tmux (set -g mouse on in ~/.tmux.conf).
+	return fmt.Sprintf("bash -l -c 'tmux new-session -A -s rubbish bash -l -c %q'", inner)
 }
 
 func repoName(rawURL string) string {

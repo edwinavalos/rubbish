@@ -58,7 +58,7 @@ EOF
 # Install packages and set up claude user inside chroot
 chroot "${MOUNT_DIR}" /bin/sh -c "
     apk update &&
-    apk add --no-cache openssh bash curl git nodejs npm sudo &&
+    apk add --no-cache openssh bash curl git nodejs npm sudo tmux &&
 
     # Create claude user (session setup does this too, but baking it in saves the apk install at boot)
     adduser -D -s /bin/bash -h /home/claude claude &&
@@ -79,6 +79,9 @@ chroot "${MOUNT_DIR}" /bin/sh -c "
 
     # Seed .profile with PATH (session setup appends credentials on top of this)
     printf 'export PATH=/home/claude/.npm-global/bin:\$PATH\n' > /home/claude/.profile &&
+
+    # tmux: no status bar, mouse scrollback, prefix disabled (no pane/window creation)
+    printf 'set -g status off\nset -g mouse on\nset -g history-limit 50000\nset -g prefix None\nset -g escape-time 0\n' > /home/claude/.tmux.conf &&
 
     chown -R claude:claude /home/claude &&
 
