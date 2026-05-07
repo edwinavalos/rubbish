@@ -46,7 +46,7 @@ func newTestManagerWithProfile(
 	bridge *fakeBridgeFactory,
 	prof *profile.Store,
 ) *SessionManager {
-	return newSessionManager(snap, launcher, bridge, nil, "", prof, nil)
+	return newSessionManager(snap, launcher, bridge, nil, "", prof, nil, 4)
 }
 
 // ---- Injection tests ---------------------------------------------------------

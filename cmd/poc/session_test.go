@@ -76,7 +76,7 @@ func (f *fakeBridgeFactory) NewBridge(_ string, _ ssh.Signer) setupRunner { retu
 
 // newTestManager builds a SessionManager with all fakes wired in.
 func newTestManager(snap *fakeSnapshotter, launcher *fakeLauncher, bridge *fakeBridgeFactory) *SessionManager {
-	return newSessionManager(snap, launcher, bridge, nil, "", nil, nil)
+	return newSessionManager(snap, launcher, bridge, nil, "", nil, nil, 4)
 }
 
 // waitState polls until the session reaches the target state or times out.
@@ -138,7 +138,7 @@ func TestBoot_SnapshotFailure(t *testing.T) {
 		t.Error("Launch should not be called after snapshot failure")
 	}
 	// Slot should be freed.
-	if mgr.slots[sess.Slot] {
+	if mgr.usedSlots[sess.Slot] {
 		t.Error("slot should be freed after failure")
 	}
 }
@@ -158,7 +158,7 @@ func TestBoot_LaunchFailure(t *testing.T) {
 	if snap.deleteN.Load() != 1 {
 		t.Errorf("DeleteSnapshot called %d times after launch failure, want 1", snap.deleteN.Load())
 	}
-	if mgr.slots[sess.Slot] {
+	if mgr.usedSlots[sess.Slot] {
 		t.Error("slot should be freed after failure")
 	}
 }
@@ -182,7 +182,7 @@ func TestBoot_SSHTimeout(t *testing.T) {
 	if snap.deleteN.Load() != 1 {
 		t.Errorf("DeleteSnapshot called %d times after SSH timeout, want 1", snap.deleteN.Load())
 	}
-	if mgr.slots[sess.Slot] {
+	if mgr.usedSlots[sess.Slot] {
 		t.Error("slot should be freed after failure")
 	}
 }
@@ -209,7 +209,7 @@ func TestStop_ReadySession(t *testing.T) {
 	if snap.deleteN.Load() != 1 {
 		t.Errorf("DeleteSnapshot called %d times, want 1", snap.deleteN.Load())
 	}
-	if mgr.slots[sess.Slot] {
+	if mgr.usedSlots[sess.Slot] {
 		t.Error("slot should be freed after stop")
 	}
 }

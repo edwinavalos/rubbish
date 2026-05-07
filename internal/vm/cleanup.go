@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -53,9 +54,11 @@ func cleanupOrphans(maxSlots int, cmd commander) error {
 }
 
 func cleanupOrphansExcept(maxSlots int, skipSlots map[int]bool, cmd commander) error {
+	slotsToCheck := slotsForCleanup(maxSlots)
+
 	var errs []string
 
-	for slot := 0; slot < maxSlots; slot++ {
+	for _, slot := range slotsToCheck {
 		if skipSlots[slot] {
 			continue
 		}
@@ -90,7 +93,7 @@ func cleanupOrphansExcept(maxSlots int, skipSlots map[int]bool, cmd commander) e
 	// Belt-and-suspenders: kill stray FC processes that may still hold a socket
 	// on non-skipped slots. Skips slots with no socket file to avoid spurious lsof
 	// calls and to avoid killing recovered sessions on live slots.
-	for slot := 0; slot < maxSlots; slot++ {
+	for _, slot := range slotsToCheck {
 		if skipSlots[slot] {
 			continue
 		}
@@ -113,6 +116,28 @@ func cleanupOrphansExcept(maxSlots int, skipSlots map[int]bool, cmd commander) e
 		return errors.New(strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// slotsForCleanup returns the slot indices to scan. When maxSlots is 0
+// (unlimited), it discovers slots by globbing existing socket files.
+func slotsForCleanup(maxSlots int) []int {
+	if maxSlots > 0 {
+		slots := make([]int, maxSlots)
+		for i := range slots {
+			slots[i] = i
+		}
+		return slots
+	}
+	// Unlimited: discover slots from existing socket files.
+	matches, _ := filepath.Glob("/tmp/rubbish-fc-*.sock")
+	var slots []int
+	for _, match := range matches {
+		var slot int
+		if _, err := fmt.Sscanf(filepath.Base(match), "rubbish-fc-%d.sock", &slot); err == nil {
+			slots = append(slots, slot)
+		}
+	}
+	return slots
 }
 
 // killProcess sends SIGTERM, waits up to 2 seconds, then SIGKILLs.

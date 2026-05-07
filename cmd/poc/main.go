@@ -128,19 +128,20 @@ func (s *Session) MarshalJSON() ([]byte, error) {
 // ---- SessionManager ---------------------------------------------------------
 
 type SessionManager struct {
-	mu       sync.RWMutex
-	sessions map[string]*Session
-	slots    [vm.MaxSlots]bool
-	snap     snapshotter
-	launcher vmLauncher
-	bridges  bridgeFactory
-	signer   ssh.Signer
-	credPath string
-	prof     *profile.Store
-	store    *sessionstore.Store
+	mu        sync.RWMutex
+	sessions  map[string]*Session
+	usedSlots map[int]bool
+	maxSlots  int // 0 = unlimited
+	snap      snapshotter
+	launcher  vmLauncher
+	bridges   bridgeFactory
+	signer    ssh.Signer
+	credPath  string
+	prof      *profile.Store
+	store     *sessionstore.Store
 }
 
-func NewSessionManager(snapMgr *fc.SnapshotManager, signer ssh.Signer, credPath string, prof *profile.Store, store *sessionstore.Store) *SessionManager {
+func NewSessionManager(snapMgr *fc.SnapshotManager, signer ssh.Signer, credPath string, prof *profile.Store, store *sessionstore.Store, maxSlots int) *SessionManager {
 	return newSessionManager(
 		&realSnapshotter{snapMgr},
 		realVMLauncher{},
@@ -149,19 +150,22 @@ func NewSessionManager(snapMgr *fc.SnapshotManager, signer ssh.Signer, credPath 
 		credPath,
 		prof,
 		store,
+		maxSlots,
 	)
 }
 
-func newSessionManager(snap snapshotter, launcher vmLauncher, bridges bridgeFactory, signer ssh.Signer, credPath string, prof *profile.Store, store *sessionstore.Store) *SessionManager {
+func newSessionManager(snap snapshotter, launcher vmLauncher, bridges bridgeFactory, signer ssh.Signer, credPath string, prof *profile.Store, store *sessionstore.Store, maxSlots int) *SessionManager {
 	return &SessionManager{
-		sessions: make(map[string]*Session),
-		snap:     snap,
-		launcher: launcher,
-		bridges:  bridges,
-		signer:   signer,
-		credPath: credPath,
-		prof:     prof,
-		store:    store,
+		sessions:  make(map[string]*Session),
+		usedSlots: make(map[int]bool),
+		maxSlots:  maxSlots,
+		snap:      snap,
+		launcher:  launcher,
+		bridges:   bridges,
+		signer:    signer,
+		credPath:  credPath,
+		prof:      prof,
+		store:     store,
 	}
 }
 
@@ -199,18 +203,23 @@ func (m *SessionManager) newSM(sess *Session, initial session.State) *session.St
 }
 
 func (m *SessionManager) allocSlot() (int, bool) {
-	for i := range m.slots {
-		if !m.slots[i] {
-			m.slots[i] = true
+	if m.maxSlots > 0 && len(m.usedSlots) >= m.maxSlots {
+		return 0, false
+	}
+	for i := 0; ; i++ {
+		if m.maxSlots > 0 && i >= m.maxSlots {
+			return 0, false
+		}
+		if !m.usedSlots[i] {
+			m.usedSlots[i] = true
 			return i, true
 		}
 	}
-	return 0, false
 }
 
 func (m *SessionManager) freeSlot(slot int) {
 	m.mu.Lock()
-	m.slots[slot] = false
+	delete(m.usedSlots, slot)
 	m.mu.Unlock()
 }
 
@@ -221,7 +230,7 @@ func (m *SessionManager) Create(parentCtx context.Context, repoURL, branch, gith
 	slot, ok := m.allocSlot()
 	if !ok {
 		m.mu.Unlock()
-		return nil, fmt.Errorf("no slots available (max %d concurrent sessions)", vm.MaxSlots)
+		return nil, fmt.Errorf("no slots available (max %d concurrent sessions)", m.maxSlots)
 	}
 
 	id := uuid.New().String()
@@ -249,7 +258,7 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 	fail := func(err error) {
 		m.mu.Lock()
 		sess.Error = err.Error()
-		m.slots[sess.Slot] = false
+		delete(m.usedSlots, sess.Slot)
 		m.mu.Unlock()
 		sess.sm.Transition(session.StateFailed) //nolint:errcheck — hook persists
 		log.Printf("[session %s] failed: %v", sess.ID[:8], err)
@@ -524,7 +533,7 @@ func (m *SessionManager) Restart(parentCtx context.Context, id string) error {
 	slot, ok := m.allocSlot()
 	if !ok {
 		m.mu.Unlock()
-		return fmt.Errorf("no slots available (max %d concurrent sessions)", vm.MaxSlots)
+		return fmt.Errorf("no slots available (max %d concurrent sessions)", m.maxSlots)
 	}
 	ctx, cancel := context.WithCancel(parentCtx)
 	sess.Slot = slot
@@ -641,13 +650,13 @@ func (m *SessionManager) loadFromDB(parentCtx context.Context) {
 		m.mu.Lock()
 		m.sessions[row.ID] = sess
 		if liveSlots[row.Slot] {
-			m.slots[row.Slot] = true
+			m.usedSlots[row.Slot] = true
 		}
 		m.mu.Unlock()
 	}
 
 	// Kill any FC sockets that have no corresponding DB session.
-	if err := vm.CleanupOrphansExcept(vm.MaxSlots, liveSlots); err != nil {
+	if err := vm.CleanupOrphansExcept(m.maxSlots, liveSlots); err != nil {
 		log.Printf("[startup] cleanup orphans warning: %v", err)
 	}
 }
@@ -1018,6 +1027,7 @@ func registerHandlers(mux *http.ServeMux, mgr *SessionManager, rootCtx context.C
 
 func main() {
 	keyFlag := flag.String("key", "", "path to SSH private key for VM access")
+	slotsFlag := flag.Int("slots", 4, "max concurrent VM sessions (0 = unlimited)")
 	flag.Parse()
 
 	if *keyFlag == "" {
@@ -1054,7 +1064,7 @@ func main() {
 	defer store.Close()
 
 	prof := profile.NewStore("/opt/rubbish/creds/profile.json")
-	mgr := NewSessionManager(snapMgr, signer, credPath, prof, store)
+	mgr := NewSessionManager(snapMgr, signer, credPath, prof, store, *slotsFlag)
 
 	log.Println("[startup] recovering sessions from DB...")
 	mgr.loadFromDB(context.Background())
