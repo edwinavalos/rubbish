@@ -92,8 +92,8 @@ func TestBoot_ClonesHTTPSRepo(t *testing.T) {
 	if !strings.Contains(cmds[cloneIdx], "https://github.com/example/myrepo") {
 		t.Errorf("clone command = %q, want https URL", cmds[cloneIdx])
 	}
-	if !strings.Contains(cmds[cloneIdx], "/root/workspace/myrepo") {
-		t.Errorf("clone command = %q, want clone into /root/workspace/myrepo", cmds[cloneIdx])
+	if !strings.Contains(cmds[cloneIdx], "/home/claude/workspace/myrepo") {
+		t.Errorf("clone command = %q, want clone into /home/claude/workspace/myrepo", cmds[cloneIdx])
 	}
 }
 

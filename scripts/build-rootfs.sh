@@ -3,12 +3,13 @@ set -euo pipefail
 
 ALPINE_VERSION="3.21"
 ALPINE_ARCH="x86_64"
+GO_VERSION="1.24.3"
 ROOTFS_SIZE_MB=4096
 OUTPUT="/opt/rubbish/images/rootfs.ext4"
 MOUNT_DIR=$(mktemp -d)
 WORK_DIR=$(mktemp -d)
 
-# SSH public key to bake in (reads from invoking user's authorized_keys)
+# SSH public key to bake in for both root and claude (reads from invoking user's authorized_keys)
 SSH_PUBKEY="${SSH_PUBKEY:-$(cat ~/.ssh/authorized_keys 2>/dev/null | head -1 || true)}"
 
 cleanup() {
@@ -27,6 +28,12 @@ TARBALL="${WORK_DIR}/alpine-minirootfs.tar.gz"
 echo "Downloading ${ALPINE_URL}"
 curl -L -o "${TARBALL}" "${ALPINE_URL}"
 
+# Download Go toolchain
+GO_URL="https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
+GO_TARBALL="${WORK_DIR}/go.tar.gz"
+echo "Downloading Go ${GO_VERSION}"
+curl -L -o "${GO_TARBALL}" "${GO_URL}"
+
 # Create ext4 image
 echo "Creating ${ROOTFS_SIZE_MB}MB ext4 image"
 dd if=/dev/zero of="${OUTPUT}" bs=1M count="${ROOTFS_SIZE_MB}" status=progress
@@ -36,6 +43,11 @@ mkfs.ext4 -F "${OUTPUT}"
 mount -o loop "${OUTPUT}" "${MOUNT_DIR}"
 tar -xzf "${TARBALL}" -C "${MOUNT_DIR}"
 
+# Install Go into the rootfs
+rm -rf "${MOUNT_DIR}/usr/local/go"
+tar -C "${MOUNT_DIR}/usr/local" -xzf "${GO_TARBALL}"
+echo "Go ${GO_VERSION} installed at /usr/local/go"
+
 # Bind-mount /dev and /proc so chroot commands work
 mount --bind /dev "${MOUNT_DIR}/dev"
 mount --bind /proc "${MOUNT_DIR}/proc"
@@ -43,7 +55,7 @@ mount --bind /proc "${MOUNT_DIR}/proc"
 # Configure DNS
 echo "nameserver 1.1.1.1" > "${MOUNT_DIR}/etc/resolv.conf"
 
-# Network interface config (eth0 static IP)
+# Network interface config (eth0 static IP — overwritten per-slot at boot by InjectNetworkConfig)
 cat > "${MOUNT_DIR}/etc/network/interfaces" <<'EOF'
 auto lo
 iface lo inet loopback
@@ -55,17 +67,28 @@ iface eth0 inet static
     gateway 172.16.0.1
 EOF
 
-# Install packages and set up claude user inside chroot
+# System-wide Go + claude PATH/env for login shells
+cat > "${MOUNT_DIR}/etc/profile.d/rubbish.sh" <<'ENVEOF'
+export PATH=/usr/local/go/bin:/home/claude/.npm-global/bin:$PATH
+export GOPATH=/home/claude/go
+export GOCACHE=/home/claude/.cache/go
+ENVEOF
+chmod 644 "${MOUNT_DIR}/etc/profile.d/rubbish.sh"
+
+# Install packages and set up claude as the primary user
 chroot "${MOUNT_DIR}" /bin/sh -c "
     apk update &&
-    apk add --no-cache openssh bash curl git nodejs npm sudo tmux &&
+    apk add --no-cache openssh bash curl git nodejs npm sudo tmux make nfs-utils &&
 
-    # Create claude user (session setup does this too, but baking it in saves the apk install at boot)
+    # claude is the primary interactive user — no root shell at runtime.
     adduser -D -s /bin/bash -h /home/claude claude &&
     echo 'claude ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/claude &&
     chmod 440 /etc/sudoers.d/claude &&
 
-    # Install claude-code into a claude-owned npm prefix so the user can auto-update
+    # Workspace directory
+    mkdir -p /home/claude/workspace &&
+
+    # claude-owned npm prefix for Claude Code (auto-update without sudo)
     mkdir -p /home/claude/.npm-global &&
     echo 'prefix=/home/claude/.npm-global' > /home/claude/.npmrc &&
     npm install -g --prefix /home/claude/.npm-global @anthropic-ai/claude-code &&
@@ -74,13 +97,15 @@ chroot "${MOUNT_DIR}" /bin/sh -c "
     node install.cjs &&
     cd / &&
 
-    # System-wide symlink so /usr/local/bin/claude resolves for root and other users
+    # System-wide symlink so /usr/local/bin/claude resolves for any user
     ln -sf /home/claude/.npm-global/bin/claude /usr/local/bin/claude &&
 
-    # Seed .profile with PATH (session setup appends credentials on top of this)
-    printf 'export PATH=/home/claude/.npm-global/bin:\$PATH\n' > /home/claude/.profile &&
+    # claude's .profile: PATH, GOPATH/GOCACHE so go build works without extra env flags
+    printf 'export PATH=/home/claude/.npm-global/bin:/usr/local/go/bin:\$PATH\n' > /home/claude/.profile &&
+    printf 'export GOPATH=/home/claude/go\n' >> /home/claude/.profile &&
+    printf 'export GOCACHE=/home/claude/.cache/go\n' >> /home/claude/.profile &&
 
-    # tmux: no status bar, mouse scrollback, prefix disabled (no pane/window creation)
+    # tmux: no status bar, mouse scrollback, no prefix (prevents pane/window creation)
     printf 'set -g status off\nset -g mouse on\nset -g history-limit 50000\nset -g prefix None\nset -g escape-time 0\n' > /home/claude/.tmux.conf &&
 
     chown -R claude:claude /home/claude &&
@@ -90,21 +115,27 @@ chroot "${MOUNT_DIR}" /bin/sh -c "
     mkdir -p /root/workspace
 "
 
-# Configure sshd: allow root login, no password auth
+# Configure sshd: no password auth, allow both root and claude key login
 sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' "${MOUNT_DIR}/etc/ssh/sshd_config"
 sed -i 's/#PasswordAuthentication.*/PasswordAuthentication no/' "${MOUNT_DIR}/etc/ssh/sshd_config"
 sed -i 's/PasswordAuthentication yes/PasswordAuthentication no/' "${MOUNT_DIR}/etc/ssh/sshd_config"
 
-# Install SSH authorized key
+# Bake SSH key into root's authorized_keys
 mkdir -p "${MOUNT_DIR}/root/.ssh"
 echo "${SSH_PUBKEY}" > "${MOUNT_DIR}/root/.ssh/authorized_keys"
 chmod 700 "${MOUNT_DIR}/root/.ssh"
 chmod 600 "${MOUNT_DIR}/root/.ssh/authorized_keys"
 chroot "${MOUNT_DIR}" chown -R root:root /root/.ssh
 
-# Start sshd and configure network directly via /etc/init.d/rcS (bypass openrc)
+# Bake SSH key into claude's authorized_keys — boot setup connects as claude, not root
+mkdir -p "${MOUNT_DIR}/home/claude/.ssh"
+echo "${SSH_PUBKEY}" > "${MOUNT_DIR}/home/claude/.ssh/authorized_keys"
+chmod 700 "${MOUNT_DIR}/home/claude/.ssh"
+chmod 600 "${MOUNT_DIR}/home/claude/.ssh/authorized_keys"
+chroot "${MOUNT_DIR}" chown -R claude:claude /home/claude/.ssh
+
+# Start sshd and configure network via /etc/init.d/rcS (bypass openrc for microVM simplicity)
 mkdir -p "${MOUNT_DIR}/etc/init.d"
-# Alpine minirootfs doesn't have openrc configured for boot; use a simple rcS script
 cat > "${MOUNT_DIR}/etc/init.d/rcS" <<'RCEOF'
 #!/bin/sh
 mkdir -p /dev/pts
@@ -132,3 +163,4 @@ BUILD_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 echo "${BUILD_TS}" > "${MOUNT_DIR}/etc/rubbish-build"
 
 echo "Rootfs built: ${OUTPUT} (${BUILD_TS})"
+echo "Go ${GO_VERSION} included. claude is the primary user with SSH key baked in."

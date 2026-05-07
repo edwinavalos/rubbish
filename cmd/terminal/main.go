@@ -153,7 +153,7 @@ func sessionStartCmd(repoURL string) string {
 	inner := "claude --dangerously-skip-permissions; exec bash -l"
 	if repoURL != "" {
 		if name := repoName(repoURL); name != "" {
-			inner = fmt.Sprintf("cd /root/workspace/%s 2>/dev/null || cd ~; %s", name, inner)
+			inner = fmt.Sprintf("cd ~/workspace/%s 2>/dev/null || cd ~; %s", name, inner)
 		}
 	}
 	// tmux new-session -A: attach to existing session or create a new one.

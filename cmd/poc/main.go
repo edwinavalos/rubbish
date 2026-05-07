@@ -78,7 +78,7 @@ func (realVMLauncher) Launch(ctx context.Context, slot int, rootfsPath string, m
 type realBridgeFactory struct{ signer ssh.Signer }
 
 func (r *realBridgeFactory) NewBridge(addr string, _ ssh.Signer) setupRunner {
-	return terminal.NewBridge(addr, "root", r.signer)
+	return terminal.NewBridge(addr, "claude", r.signer)
 }
 
 // ---- Session ----------------------------------------------------------------
@@ -338,7 +338,7 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		}
 		cmds := []string{
 			"git config --global credential.helper store",
-			fmt.Sprintf(`printf 'https://oauth2:%s@github.com\n' > /root/.git-credentials`, token),
+			fmt.Sprintf(`printf 'https://oauth2:%s@github.com\n' > ~/.git-credentials`, token),
 		}
 		if err := bridge.RunSetup(cmds); err != nil {
 			log.Printf("[session %s] warning: git credential setup: %v", sess.ID[:8], err)
@@ -348,9 +348,9 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 	}
 
 	if sess.RepoURL != "" {
-		cloneDir := "/root/workspace"
+		cloneDir := "/home/claude/workspace"
 		if name := repoName(sess.RepoURL); name != "" {
-			cloneDir = "/root/workspace/" + name
+			cloneDir = "/home/claude/workspace/" + name
 		}
 		var cloneCmd string
 		if sess.Branch != "" {
@@ -366,78 +366,30 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		}
 	}
 
-	// Create the claude user so the terminal can connect as a non-root user.
-	// Claude Code refuses --dangerously-skip-permissions when running as root.
-	if m.signer != nil {
-		log.Printf("[session %s] creating claude user", sess.ID[:8])
-		shortID := sess.ID[:8]
-		vmHostname := "rubbish-" + shortID
-		pubKey := strings.TrimRight(string(ssh.MarshalAuthorizedKey(m.signer.PublicKey())), "\n")
-		if err := bridge.RunSetup([]string{
-			"hostname " + vmHostname,
-			"echo " + vmHostname + " > /etc/hostname",
-			"adduser -D -s /bin/bash -h /home/claude claude 2>/dev/null || true",
-			"passwd -u claude 2>/dev/null || true",
-			"mkdir -p /home/claude/.ssh",
-			// Write authorized_keys directly — avoids base64 tool availability issues.
-			// The key line is pure ASCII (no shell-special chars other than spaces).
-			"echo " + pubKey + " > /home/claude/.ssh/authorized_keys",
-			"test -s /home/claude/.ssh/authorized_keys",
-			"chmod 700 /home/claude/.ssh",
-			"chmod 600 /home/claude/.ssh/authorized_keys",
-			// Set up user-owned npm prefix so claude can auto-update Claude Code without sudo.
-			"mkdir -p /home/claude/.npm-global/bin",
-			"grep -q npm-global /home/claude/.npmrc 2>/dev/null || echo 'prefix=/home/claude/.npm-global' > /home/claude/.npmrc",
-			"grep -q npm-global /home/claude/.profile 2>/dev/null || printf 'export PATH=/home/claude/.npm-global/bin:$PATH\\n' >> /home/claude/.profile",
-			// Seed tmux config: no status bar, mouse scrollback, prefix disabled so
-			// users can't create panes/windows.
-			"test -f /home/claude/.tmux.conf || printf 'set -g status off\\nset -g mouse on\\nset -g history-limit 50000\\nset -g prefix None\\nset -g escape-time 0\\n' > /home/claude/.tmux.conf",
-			"chown -R claude:claude /home/claude",
-			"chmod 755 /root",
-			"chown -R claude:claude /root/workspace 2>/dev/null || true",
-		}); err != nil {
-			log.Printf("[session %s] warning: create claude user: %v", sess.ID[:8], err)
-		} else {
-			log.Printf("[session %s] claude user ready", sess.ID[:8])
-		}
-		// Install sudo and grant claude NOPASSWD — non-fatal since apk needs network.
-		if err := bridge.RunSetup([]string{
-			"apk add --quiet --no-progress sudo",
-			"mkdir -p /etc/sudoers.d",
-			"echo 'claude ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/claude",
-			"chmod 440 /etc/sudoers.d/claude",
-		}); err != nil {
-			log.Printf("[session %s] warning: sudo setup: %v", sess.ID[:8], err)
-		}
+	// Set a unique per-session hostname so the prompt shows the session ID.
+	// claude has NOPASSWD sudo baked into the rootfs, so no privilege escalation needed.
+	shortID := sess.ID[:8]
+	vmHostname := "rubbish-" + shortID
+	if err := bridge.RunSetup([]string{
+		"sudo hostname " + vmHostname,
+		"echo " + vmHostname + " | sudo tee /etc/hostname > /dev/null",
+	}); err != nil {
+		log.Printf("[session %s] warning: set hostname: %v", sess.ID[:8], err)
 	}
 
 	// Inject profile credentials into the VM environment.
 	if m.prof != nil {
 		if p, err := m.prof.Load(); err == nil && p.ClaudeOAuthToken != "" {
 			cmds := []string{
-				// Write token to claude's .profile so it's readable by the claude user.
-				// /etc/profile.d/ with chmod 600 (root-owned) is unreadable by the claude user's login shell.
-				fmt.Sprintf("printf 'export CLAUDE_CODE_OAUTH_TOKEN=%s\\n' >> /home/claude/.profile", p.ClaudeOAuthToken),
-				"chmod 600 /home/claude/.profile",
-				"chown claude:claude /home/claude/.profile",
-				// Write .claude.json to claude's home — terminal connects as claude, not root.
-				`printf '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.29"}\n' > /home/claude/.claude.json`,
-				"chown claude:claude /home/claude/.claude.json",
-				"chmod 600 /home/claude/.claude.json",
+				fmt.Sprintf("printf 'export CLAUDE_CODE_OAUTH_TOKEN=%s\\n' >> ~/.profile", p.ClaudeOAuthToken),
+				"chmod 600 ~/.profile",
+				`printf '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.29"}\n' > ~/.claude.json`,
+				"chmod 600 ~/.claude.json",
 			}
 			if err := bridge.RunSetup(cmds); err != nil {
 				log.Printf("[session %s] warning: inject credentials: %v", sess.ID[:8], err)
 			}
 		}
-	}
-
-	// Copy git credentials to claude's home so git works in the terminal.
-	if err := bridge.RunSetup([]string{
-		"cp /root/.gitconfig /home/claude/.gitconfig 2>/dev/null || true",
-		"cp /root/.git-credentials /home/claude/.git-credentials 2>/dev/null || true",
-		"chown claude:claude /home/claude/.gitconfig /home/claude/.git-credentials 2>/dev/null || true",
-	}); err != nil {
-		log.Printf("[session %s] warning: copy git credentials to claude: %v", sess.ID[:8], err)
 	}
 
 	// 6. Dev seed (optional)
@@ -724,9 +676,10 @@ func seedDevFiles(bridge setupRunner) error {
 	}
 
 	// Memory dirs — NFS-mounted for live shared read/write across all dev sessions.
+	// Needs sudo since bridge connects as claude (who has NOPASSWD sudo in the rootfs).
 	if err := bridge.RunSetup([]string{
-		fmt.Sprintf("mount -t nfs %s:%s %s -o %s", hostIP, nfsGlobalMem, vmGlobalMem, nfsMountOpts),
-		fmt.Sprintf("mount -t nfs %s:%s %s -o %s", hostIP, nfsProjects, vmProjects, nfsMountOpts),
+		fmt.Sprintf("sudo mount -t nfs %s:%s %s -o %s", hostIP, nfsGlobalMem, vmGlobalMem, nfsMountOpts),
+		fmt.Sprintf("sudo mount -t nfs %s:%s %s -o %s", hostIP, nfsProjects, vmProjects, nfsMountOpts),
 	}); err != nil {
 		return fmt.Errorf("nfs mount: %w", err)
 	}
@@ -759,14 +712,6 @@ func seedDevFiles(bridge setupRunner) error {
 		} else {
 			bridge.RunSetup([]string{"chmod 644 " + vmSSHDir + "/known_hosts"}) //nolint:errcheck
 		}
-	}
-
-	// Fix ownership so claude user owns everything we wrote.
-	if err := bridge.RunSetup([]string{
-		"chown -R claude:claude " + vmHome + "/.claude",
-		"chown -R claude:claude " + vmSSHDir,
-	}); err != nil {
-		log.Printf("[seed] warning: chown: %v", err)
 	}
 
 	log.Printf("[seed] dev files injected (host=%s)", hostIP)
