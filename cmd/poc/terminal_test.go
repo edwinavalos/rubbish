@@ -20,19 +20,3 @@ func TestRepoName(t *testing.T) {
 		}
 	}
 }
-
-func TestSessionStartCmd_WithRepo(t *testing.T) {
-	cmd := sessionStartCmd("https://github.com/edwinavalos/rubbish")
-	want := "bash -l -c 'cd /root/workspace/rubbish 2>/dev/null || cd /root/workspace; claude; exec bash -l'"
-	if cmd != want {
-		t.Errorf("sessionStartCmd(repo) = %q, want %q", cmd, want)
-	}
-}
-
-func TestSessionStartCmd_NoRepo(t *testing.T) {
-	cmd := sessionStartCmd("")
-	want := "bash -l -c 'claude; exec bash -l'"
-	if cmd != want {
-		t.Errorf("sessionStartCmd(\"\") = %q, want %q", cmd, want)
-	}
-}

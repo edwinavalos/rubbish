@@ -86,7 +86,7 @@
     <span class="sep">›</span>
     <span class="session-id" id="sessionLabel">—</span>
   </div>
-  <a href="/">← Sessions</a>
+  <a id="backLink" href="/">← Sessions</a>
 </div>
 
 <div id="terminal-wrapper">
@@ -98,6 +98,7 @@
 <script>
   const id = location.pathname.split('/').filter(Boolean).pop();
   document.getElementById('sessionLabel').textContent = id || 'unknown';
+  document.getElementById('backLink').href = `${location.protocol}//${location.hostname}:8080/`;
   document.title = `rubbish › ${id || 'terminal'}`;
 
   // ── Detect color scheme and pick xterm theme ───────────────────────────────

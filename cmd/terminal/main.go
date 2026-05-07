@@ -80,13 +80,15 @@ func main() {
 }
 
 func sessionStartCmd(repoURL string) string {
+	inner := "claude --dangerously-skip-permissions; exec bash -l"
 	if repoURL != "" {
-		name := repoName(repoURL)
-		if name != "" {
-			return fmt.Sprintf("bash -l -c 'cd /root/workspace/%s 2>/dev/null || cd ~; claude --dangerously-skip-permissions; exec bash -l'", name)
+		if name := repoName(repoURL); name != "" {
+			inner = fmt.Sprintf("cd /root/workspace/%s 2>/dev/null || cd ~; %s", name, inner)
 		}
 	}
-	return "bash -l -c 'claude --dangerously-skip-permissions; exec bash -l'"
+	// screen -D -R: reattach to existing session (detaching any other client) or
+	// create a new one. This keeps claude running through WebSocket disconnects.
+	return fmt.Sprintf("bash -l -c 'screen -D -R -S rubbish bash -l -c %q'", inner)
 }
 
 func repoName(rawURL string) string {

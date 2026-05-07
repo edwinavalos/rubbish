@@ -1,8 +1,10 @@
 package terminal
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -33,6 +35,12 @@ func NewBridge(host, user string, signer ssh.Signer) *Bridge {
 // RunSetup opens a non-PTY SSH session and runs each command sequentially.
 // Stops and returns an error on the first failure.
 func (b *Bridge) RunSetup(commands []string) error {
+	return b.RunSetupCapture(commands, io.Discard)
+}
+
+// RunSetupCapture is like RunSetup but writes each command's combined
+// stdout+stderr to w. Used by integration tests to inspect output.
+func (b *Bridge) RunSetupCapture(commands []string, w io.Writer) error {
 	client, err := dialSSH(b.host, b.user, b.sshKey)
 	if err != nil {
 		return fmt.Errorf("ssh dial: %w", err)
@@ -44,8 +52,15 @@ func (b *Bridge) RunSetup(commands []string) error {
 		if err != nil {
 			return fmt.Errorf("new session for %q: %w", cmd, err)
 		}
+		// Use separate buffers — bytes.Buffer is not goroutine-safe and the SSH
+		// library copies stdout and stderr concurrently.
+		var stdout, stderr bytes.Buffer
+		sess.Stdout = &stdout
+		sess.Stderr = &stderr
 		err = sess.Run(cmd)
 		sess.Close()
+		_, _ = w.Write(stdout.Bytes())
+		_, _ = w.Write(stderr.Bytes())
 		if err != nil {
 			return fmt.Errorf("run %q: %w", cmd, err)
 		}

@@ -359,12 +359,16 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 
 	// Create the claude user so the terminal can connect as a non-root user.
 	// Claude Code refuses --dangerously-skip-permissions when running as root.
-	pubKeyB64 := base64.StdEncoding.EncodeToString(ssh.MarshalAuthorizedKey(m.signer.PublicKey()))
+	log.Printf("[session %s] creating claude user", sess.ID[:8])
+	pubKey := strings.TrimRight(string(ssh.MarshalAuthorizedKey(m.signer.PublicKey())), "\n")
 	if err := bridge.RunSetup([]string{
 		"adduser -D -s /bin/bash -h /home/claude claude 2>/dev/null || true",
 		"passwd -u claude 2>/dev/null || true",
 		"mkdir -p /home/claude/.ssh",
-		"echo " + pubKeyB64 + " | base64 -d > /home/claude/.ssh/authorized_keys",
+		// Write authorized_keys directly — avoids base64 tool availability issues.
+		// The key line is pure ASCII (no shell-special chars other than spaces).
+		"echo " + pubKey + " > /home/claude/.ssh/authorized_keys",
+		"test -s /home/claude/.ssh/authorized_keys",
 		"chmod 700 /home/claude/.ssh",
 		"chmod 600 /home/claude/.ssh/authorized_keys",
 		"chown -R claude:claude /home/claude",
@@ -372,6 +376,8 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		"chown -R claude:claude /root/workspace 2>/dev/null || true",
 	}); err != nil {
 		log.Printf("[session %s] warning: create claude user: %v", sess.ID[:8], err)
+	} else {
+		log.Printf("[session %s] claude user ready", sess.ID[:8])
 	}
 	// Install sudo and grant claude NOPASSWD — non-fatal since apk needs network.
 	if err := bridge.RunSetup([]string{
@@ -387,9 +393,11 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 	if m.prof != nil {
 		if p, err := m.prof.Load(); err == nil && p.ClaudeOAuthToken != "" {
 			cmds := []string{
-				"mkdir -p /etc/profile.d",
-				fmt.Sprintf("printf 'export CLAUDE_CODE_OAUTH_TOKEN=%s\\n' > /etc/profile.d/rubbish-credentials.sh", p.ClaudeOAuthToken),
-				"chmod 600 /etc/profile.d/rubbish-credentials.sh",
+				// Write token to claude's .profile so it's readable by the claude user.
+				// /etc/profile.d/ with chmod 600 (root-owned) is unreadable by the claude user's login shell.
+				fmt.Sprintf("printf 'export CLAUDE_CODE_OAUTH_TOKEN=%s\\n' >> /home/claude/.profile", p.ClaudeOAuthToken),
+				"chmod 600 /home/claude/.profile",
+				"chown claude:claude /home/claude/.profile",
 				// Write .claude.json to claude's home — terminal connects as claude, not root.
 				`printf '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.29"}\n' > /home/claude/.claude.json`,
 				"chown claude:claude /home/claude/.claude.json",
