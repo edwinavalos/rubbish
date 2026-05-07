@@ -87,14 +87,17 @@ func cleanupOrphansExcept(maxSlots int, skipSlots map[int]bool, cmd commander) e
 		}
 	}
 
-	// Belt-and-suspenders: kill stray FC processes on non-skipped slots only.
-	// We can't use a blanket pkill here because it would also kill recovered
-	// sessions on live slots.
+	// Belt-and-suspenders: kill stray FC processes that may still hold a socket
+	// on non-skipped slots. Skips slots with no socket file to avoid spurious lsof
+	// calls and to avoid killing recovered sessions on live slots.
 	for slot := 0; slot < maxSlots; slot++ {
 		if skipSlots[slot] {
 			continue
 		}
 		sock := fmt.Sprintf("/tmp/rubbish-fc-%d.sock", slot)
+		if _, err := os.Stat(sock); os.IsNotExist(err) {
+			continue
+		}
 		out, err := cmd.command("lsof", "-t", sock).Output()
 		if err == nil {
 			pidStr := strings.TrimSpace(string(out))

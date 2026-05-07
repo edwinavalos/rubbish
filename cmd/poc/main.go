@@ -359,34 +359,36 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 
 	// Create the claude user so the terminal can connect as a non-root user.
 	// Claude Code refuses --dangerously-skip-permissions when running as root.
-	log.Printf("[session %s] creating claude user", sess.ID[:8])
-	pubKey := strings.TrimRight(string(ssh.MarshalAuthorizedKey(m.signer.PublicKey())), "\n")
-	if err := bridge.RunSetup([]string{
-		"adduser -D -s /bin/bash -h /home/claude claude 2>/dev/null || true",
-		"passwd -u claude 2>/dev/null || true",
-		"mkdir -p /home/claude/.ssh",
-		// Write authorized_keys directly — avoids base64 tool availability issues.
-		// The key line is pure ASCII (no shell-special chars other than spaces).
-		"echo " + pubKey + " > /home/claude/.ssh/authorized_keys",
-		"test -s /home/claude/.ssh/authorized_keys",
-		"chmod 700 /home/claude/.ssh",
-		"chmod 600 /home/claude/.ssh/authorized_keys",
-		"chown -R claude:claude /home/claude",
-		"chmod 755 /root",
-		"chown -R claude:claude /root/workspace 2>/dev/null || true",
-	}); err != nil {
-		log.Printf("[session %s] warning: create claude user: %v", sess.ID[:8], err)
-	} else {
-		log.Printf("[session %s] claude user ready", sess.ID[:8])
-	}
-	// Install sudo and grant claude NOPASSWD — non-fatal since apk needs network.
-	if err := bridge.RunSetup([]string{
-		"apk add --quiet --no-progress sudo",
-		"mkdir -p /etc/sudoers.d",
-		"echo 'claude ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/claude",
-		"chmod 440 /etc/sudoers.d/claude",
-	}); err != nil {
-		log.Printf("[session %s] warning: sudo setup: %v", sess.ID[:8], err)
+	if m.signer != nil {
+		log.Printf("[session %s] creating claude user", sess.ID[:8])
+		pubKey := strings.TrimRight(string(ssh.MarshalAuthorizedKey(m.signer.PublicKey())), "\n")
+		if err := bridge.RunSetup([]string{
+			"adduser -D -s /bin/bash -h /home/claude claude 2>/dev/null || true",
+			"passwd -u claude 2>/dev/null || true",
+			"mkdir -p /home/claude/.ssh",
+			// Write authorized_keys directly — avoids base64 tool availability issues.
+			// The key line is pure ASCII (no shell-special chars other than spaces).
+			"echo " + pubKey + " > /home/claude/.ssh/authorized_keys",
+			"test -s /home/claude/.ssh/authorized_keys",
+			"chmod 700 /home/claude/.ssh",
+			"chmod 600 /home/claude/.ssh/authorized_keys",
+			"chown -R claude:claude /home/claude",
+			"chmod 755 /root",
+			"chown -R claude:claude /root/workspace 2>/dev/null || true",
+		}); err != nil {
+			log.Printf("[session %s] warning: create claude user: %v", sess.ID[:8], err)
+		} else {
+			log.Printf("[session %s] claude user ready", sess.ID[:8])
+		}
+		// Install sudo and grant claude NOPASSWD — non-fatal since apk needs network.
+		if err := bridge.RunSetup([]string{
+			"apk add --quiet --no-progress sudo",
+			"mkdir -p /etc/sudoers.d",
+			"echo 'claude ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/claude",
+			"chmod 440 /etc/sudoers.d/claude",
+		}); err != nil {
+			log.Printf("[session %s] warning: sudo setup: %v", sess.ID[:8], err)
+		}
 	}
 
 	// Inject profile credentials into the VM environment.

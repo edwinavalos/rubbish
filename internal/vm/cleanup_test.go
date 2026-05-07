@@ -69,9 +69,6 @@ func TestCleanupOrphans_OccupiedSlot(t *testing.T) {
 	if !fc.called("lsof -t") {
 		t.Error("expected lsof to be called for occupied slot")
 	}
-	if !fc.called("pkill") {
-		t.Error("expected pkill belt-and-suspenders sweep")
-	}
 	if _, err := os.Stat(realSock); !os.IsNotExist(err) {
 		t.Error("expected socket file to be removed after cleanup")
 	}
@@ -89,10 +86,6 @@ func TestCleanupOrphans_EmptySlot(t *testing.T) {
 		if strings.HasPrefix(c, "lsof") {
 			t.Errorf("expected no lsof call for empty slot, got: %s", c)
 		}
-	}
-	// pkill sweep still runs.
-	if !fc.called("pkill") {
-		t.Error("expected pkill belt-and-suspenders sweep even with no occupied slots")
 	}
 }
 
