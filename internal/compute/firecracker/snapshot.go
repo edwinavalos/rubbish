@@ -64,7 +64,7 @@ func newSnapshotManager(poolDevice, idPath string, dm dmRunner) (*SnapshotManage
 		return nil, err
 	}
 	if sm.baseVolumeID < 0 {
-		return nil, fmt.Errorf("could not determine base volume ID from rubbish-base device")
+		return nil, fmt.Errorf("could not determine base volume ID from rubbish-base-ro device")
 	}
 	return sm, nil
 }
@@ -74,14 +74,14 @@ func newSnapshotManager(poolDevice, idPath string, dm dmRunner) (*SnapshotManage
 // individual device reads; only the base vol ID is fatal.
 func (s *SnapshotManager) discoverState() error {
 	// Discover base vol ID from the live device table.
-	out, err := s.dm.run("sudo", "dmsetup", "table", "rubbish-base")
+	out, err := s.dm.run("sudo", "dmsetup", "table", "rubbish-base-ro")
 	if err != nil {
 		return fmt.Errorf("dmsetup table rubbish-base: %s: %w", out, err)
 	}
 	// Table format: "0 <sectors> thin <pool-dev> <vol-id>"
 	fields := strings.Fields(string(out))
 	if len(fields) < 5 || fields[2] != "thin" {
-		return fmt.Errorf("unexpected rubbish-base table: %q", strings.TrimSpace(string(out)))
+		return fmt.Errorf("unexpected rubbish-base-ro table: %q", strings.TrimSpace(string(out)))
 	}
 	baseVolID, err := strconv.Atoi(fields[4])
 	if err != nil {
@@ -189,7 +189,7 @@ func (s *SnapshotManager) DeleteSnapshot(sessionID string) error {
 }
 
 func (s *SnapshotManager) BaseSize() (int64, error) {
-	out, err := s.dm.run("sudo", "blockdev", "--getsz", "/dev/mapper/rubbish-base")
+	out, err := s.dm.run("sudo", "blockdev", "--getsz", "/dev/mapper/rubbish-base-ro")
 	if err != nil {
 		return 0, fmt.Errorf("blockdev --getsz: %s: %w", out, err)
 	}

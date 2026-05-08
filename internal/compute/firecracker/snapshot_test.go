@@ -40,15 +40,15 @@ func (f *fakeDM) calledContaining(substr string) bool {
 	return false
 }
 
-// newFakeDM returns a fakeDM pre-loaded with the standard rubbish-base table
+// newFakeDM returns a fakeDM pre-loaded with the standard rubbish-base-ro table
 // (thin vol baseVolID) and an empty ls output (no existing session devices).
 func newFakeDM(baseVolID int) *fakeDM {
 	pool := "/dev/mapper/rubbish-pool"
 	return &fakeDM{
 		output: map[string]string{
-			"sudo dmsetup table rubbish-base":                "0 8388608 thin " + pool + " " + strconv.Itoa(baseVolID),
-			"sudo dmsetup ls":                                "",
-			"sudo blockdev --getsz /dev/mapper/rubbish-base": "8388608",
+			"sudo dmsetup table rubbish-base-ro":                "0 8388608 thin " + pool + " " + strconv.Itoa(baseVolID),
+			"sudo dmsetup ls":                                   "",
+			"sudo blockdev --getsz /dev/mapper/rubbish-base-ro": "8388608",
 		},
 		errors: map[string]error{},
 	}
@@ -168,18 +168,18 @@ func TestDeleteSnapshot_UnknownSession(t *testing.T) {
 }
 
 // TestNewSnapshotManager_BadBase verifies that initialization fails cleanly
-// when the rubbish-base device is missing or has an unexpected table format.
+// when the rubbish-base-ro device is missing or has an unexpected table format.
 func TestNewSnapshotManager_BadBase(t *testing.T) {
 	dm := &fakeDM{
 		output: map[string]string{
 			"sudo dmsetup ls": "",
 		},
 		errors: map[string]error{
-			"sudo dmsetup table rubbish-base": fmt.Errorf("no such device"),
+			"sudo dmsetup table rubbish-base-ro": fmt.Errorf("no such device"),
 		},
 	}
 	_, err := newSnapshotManager(poolDevice(t), writeIDFile(t, 2), dm)
 	if err == nil {
-		t.Error("expected error when rubbish-base is missing, got nil")
+		t.Error("expected error when rubbish-base-ro is missing, got nil")
 	}
 }
