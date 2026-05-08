@@ -748,9 +748,10 @@
   // ── Modal ─────────────────────────────────────────────────────────────────
 
   function openModal(prefillRepo, prefillBranch) {
-    $('inputRepo').value    = prefillRepo  || '';
+    const isNew = prefillRepo == null;
+    $('inputRepo').value    = isNew ? 'git@github.com:edwinavalos/rubbish.git' : prefillRepo;
     $('inputBranch').value  = prefillBranch || '';
-    $('inputDevMode').checked = false;
+    $('inputDevMode').checked = isNew;
     setModalStatus('', false);
     $('btnLaunch').disabled = false;
     $('modalBackdrop').classList.add('open');

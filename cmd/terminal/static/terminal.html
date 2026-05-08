@@ -207,6 +207,58 @@
   fitAddon.fit();
   term.focus();
 
+  // ── Clipboard ──────────────────────────────────────────────────────────────
+  function copyText(text) {
+    if (!text) return;
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+    } else {
+      fallbackCopy(text);
+    }
+  }
+
+  function fallbackCopy(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (_) {}
+    document.body.removeChild(ta);
+  }
+
+  // Auto-copy selection to system clipboard
+  term.onSelectionChange(() => copyText(term.getSelection()));
+
+  // Right-click: suppress browser menu, paste from clipboard
+  document.getElementById('terminal').addEventListener('contextmenu', e => {
+    e.preventDefault();
+    if (navigator.clipboard) {
+      navigator.clipboard.readText().then(text => {
+        if (text && ws && ws.readyState === WebSocket.OPEN) ws.send(text);
+      }).catch(() => {});
+    }
+  });
+
+  // Ctrl+Shift+C / Cmd+C: copy; Ctrl+Shift+V / Cmd+V: paste
+  term.attachCustomKeyEventHandler(e => {
+    if (e.type !== 'keydown') return true;
+    if ((e.ctrlKey && e.shiftKey && e.code === 'KeyC') ||
+        (e.metaKey && e.code === 'KeyC' && term.getSelection().length > 0)) {
+      copyText(term.getSelection());
+      return false;
+    }
+    if ((e.ctrlKey && e.shiftKey && e.code === 'KeyV') || (e.metaKey && e.code === 'KeyV')) {
+      if (navigator.clipboard) {
+        navigator.clipboard.readText().then(text => {
+          if (text && ws && ws.readyState === WebSocket.OPEN) ws.send(text);
+        }).catch(() => {});
+      }
+      return false;
+    }
+    return true;
+  });
+
   // Sync xterm viewport background (xterm injects it after open())
   const viewport = document.querySelector('.xterm-viewport');
   if (viewport) viewport.style.background = xtermTheme.background;
