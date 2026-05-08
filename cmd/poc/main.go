@@ -20,6 +20,7 @@ import (
 
 	"github.com/google/uuid"
 	fc "github.com/edwinavalos/rubbish/internal/compute/firecracker"
+	"github.com/edwinavalos/rubbish/internal/gitutil"
 	"github.com/edwinavalos/rubbish/internal/profile"
 	"github.com/edwinavalos/rubbish/internal/session"
 	"github.com/edwinavalos/rubbish/internal/sessionstore"
@@ -128,20 +129,21 @@ func (s *Session) MarshalJSON() ([]byte, error) {
 // ---- SessionManager ---------------------------------------------------------
 
 type SessionManager struct {
-	mu        sync.RWMutex
-	sessions  map[string]*Session
-	usedSlots map[int]bool
-	maxSlots  int // 0 = unlimited
-	snap      snapshotter
-	launcher  vmLauncher
-	bridges   bridgeFactory
-	signer    ssh.Signer
-	credPath  string
-	prof      *profile.Store
-	store     *sessionstore.Store
+	mu         sync.RWMutex
+	sessions   map[string]*Session
+	usedSlots  map[int]bool
+	maxSlots   int // 0 = unlimited
+	snap       snapshotter
+	launcher   vmLauncher
+	bridges    bridgeFactory
+	signer     ssh.Signer
+	credPath   string
+	prof       *profile.Store
+	store      *sessionstore.Store
+	devHostIP  string // host IP used for NFS mounts in dev-mode sessions
 }
 
-func NewSessionManager(snapMgr *fc.SnapshotManager, signer ssh.Signer, credPath string, prof *profile.Store, store *sessionstore.Store, maxSlots int) *SessionManager {
+func NewSessionManager(snapMgr *fc.SnapshotManager, signer ssh.Signer, credPath string, prof *profile.Store, store *sessionstore.Store, maxSlots int, devHostIP string) *SessionManager {
 	return newSessionManager(
 		&realSnapshotter{snapMgr},
 		realVMLauncher{},
@@ -151,10 +153,11 @@ func NewSessionManager(snapMgr *fc.SnapshotManager, signer ssh.Signer, credPath 
 		prof,
 		store,
 		maxSlots,
+		devHostIP,
 	)
 }
 
-func newSessionManager(snap snapshotter, launcher vmLauncher, bridges bridgeFactory, signer ssh.Signer, credPath string, prof *profile.Store, store *sessionstore.Store, maxSlots int) *SessionManager {
+func newSessionManager(snap snapshotter, launcher vmLauncher, bridges bridgeFactory, signer ssh.Signer, credPath string, prof *profile.Store, store *sessionstore.Store, maxSlots int, devHostIP string) *SessionManager {
 	return &SessionManager{
 		sessions:  make(map[string]*Session),
 		usedSlots: make(map[int]bool),
@@ -166,6 +169,7 @@ func newSessionManager(snap snapshotter, launcher vmLauncher, bridges bridgeFact
 		credPath:  credPath,
 		prof:      prof,
 		store:     store,
+		devHostIP: devHostIP,
 	}
 }
 
@@ -367,7 +371,7 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 
 	if sess.RepoURL != "" {
 		cloneDir := "/home/claude/workspace"
-		if name := repoName(sess.RepoURL); name != "" {
+		if name := gitutil.RepoName(sess.RepoURL); name != "" {
 			cloneDir = "/home/claude/workspace/" + name
 		}
 		var cloneCmd string
@@ -413,7 +417,7 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 	// 6. Dev seed (optional)
 	if sess.DevMode {
 		log.Printf("[session %s] seeding dev files", sess.ID[:8])
-		if err := seedDevFiles(bridge); err != nil {
+		if err := seedDevFiles(bridge, m.devHostIP); err != nil {
 			log.Printf("[session %s] warning: dev seed: %v", sess.ID[:8], err)
 		}
 	}
@@ -655,9 +659,8 @@ const nfsBase = "/opt/rubbish/claude-shared"
 //   - Global memory + project memory — NFS-mounted so all dev sessions share
 //     live read/write access to the same files on the host
 //   - Deploy SSH key + SSH config + known_hosts — base64-injected
-func seedDevFiles(bridge setupRunner) error {
+func seedDevFiles(bridge setupRunner, hostIP string) error {
 	const (
-		hostIP       = "192.168.1.35"
 		nfsGlobalMem = nfsBase + "/memory"
 		nfsProjects  = nfsBase + "/projects"
 		vmHome       = "/home/claude"
@@ -734,18 +737,6 @@ func seedDevFiles(bridge setupRunner) error {
 
 	log.Printf("[seed] dev files injected (host=%s)", hostIP)
 	return nil
-}
-
-// repoName extracts the repository name from a clone URL.
-// e.g. "https://github.com/user/myrepo.git" → "myrepo"
-func repoName(url string) string {
-	url = strings.TrimRight(url, "/")
-	url = strings.TrimSuffix(url, ".git")
-	idx := strings.LastIndexAny(url, "/:")
-	if idx < 0 || idx == len(url)-1 {
-		return ""
-	}
-	return url[idx+1:]
 }
 
 // ---- Credential helpers -----------------------------------------------------
@@ -892,7 +883,7 @@ func registerHandlers(mux *http.ServeMux, mgr *SessionManager, rootCtx context.C
 				http.Error(w, "session not found", http.StatusNotFound)
 				return
 			}
-			name := repoName(sess.RepoURL)
+			name := gitutil.RepoName(sess.RepoURL)
 			if name == "" {
 				name = sess.ID[:8]
 			}
@@ -991,6 +982,7 @@ func registerHandlers(mux *http.ServeMux, mgr *SessionManager, rootCtx context.C
 func main() {
 	keyFlag := flag.String("key", "", "path to SSH private key for VM access")
 	slotsFlag := flag.Int("slots", 4, "max concurrent VM sessions (0 = unlimited)")
+	devHostIPFlag := flag.String("dev-host-ip", "192.168.1.35", "host IP for NFS mounts in dev-mode sessions")
 	flag.Parse()
 
 	if *keyFlag == "" {
@@ -1027,7 +1019,7 @@ func main() {
 	defer store.Close()
 
 	prof := profile.NewStore("/opt/rubbish/creds/profile.json")
-	mgr := NewSessionManager(snapMgr, signer, credPath, prof, store, *slotsFlag)
+	mgr := NewSessionManager(snapMgr, signer, credPath, prof, store, *slotsFlag, *devHostIPFlag)
 
 	log.Println("[startup] recovering sessions from DB...")
 	mgr.loadFromDB(context.Background())
@@ -1046,7 +1038,7 @@ func main() {
 	}
 
 	go func() {
-		log.Println("[poc] serving on http://192.168.1.35:8080")
+		log.Printf("[poc] serving on %s", srv.Addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server: %v", err)
 		}

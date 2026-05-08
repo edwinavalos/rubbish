@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 
@@ -82,15 +83,6 @@ func (b *Bridge) Relay(ws *websocket.Conn, startCmd string) {
 	b.relay(ws, startCmd, time.Now())
 }
 
-func (b *Bridge) ServeWS(w http.ResponseWriter, r *http.Request, startCmd string) {
-	ws, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	b.Relay(ws, startCmd)
-}
-
 func (b *Bridge) relay(ws *websocket.Conn, startCmd string, connStart time.Time) {
 	client, err := dialSSH(b.host, b.user, b.sshKey)
 	if err != nil {
@@ -130,7 +122,7 @@ func (b *Bridge) relay(ws *websocket.Conn, startCmd string, connStart time.Time)
 		return
 	}
 
-	fmt.Printf("[terminal] session ready in %s\n", time.Since(connStart).Round(time.Millisecond))
+	log.Printf("[terminal] session ready in %s", time.Since(connStart).Round(time.Millisecond))
 
 	done := make(chan struct{})
 
@@ -143,7 +135,7 @@ func (b *Bridge) relay(ws *websocket.Conn, startCmd string, connStart time.Time)
 			n, err := stdout.Read(buf)
 			if n > 0 {
 				if first {
-					fmt.Printf("[terminal] first byte from PTY in %s\n", time.Since(connStart).Round(time.Millisecond))
+					log.Printf("[terminal] first byte from PTY in %s", time.Since(connStart).Round(time.Millisecond))
 					first = false
 				}
 				if err := ws.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {

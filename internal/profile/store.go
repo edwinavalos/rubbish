@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"strings"
+	"sync"
 )
 
 type Profile struct {
@@ -12,6 +13,7 @@ type Profile struct {
 }
 
 type Store struct {
+	mu   sync.RWMutex
 	path string
 }
 
@@ -20,6 +22,9 @@ func NewStore(path string) *Store {
 }
 
 func (s *Store) Load() (Profile, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	data, err := os.ReadFile(s.path)
 	if os.IsNotExist(err) {
 		return Profile{}, nil
@@ -35,6 +40,9 @@ func (s *Store) Load() (Profile, error) {
 }
 
 func (s *Store) Save(p Profile) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	data, err := json.Marshal(p)
 	if err != nil {
 		return err

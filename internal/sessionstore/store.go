@@ -142,7 +142,10 @@ func (s *Store) ListFavorites() ([]Favorite, error) {
 		if err := rows.Scan(&f.ID, &f.Name, &f.RepoURL, &f.Branch, &createdAt); err != nil {
 			return nil, err
 		}
-		f.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		var parseErr error
+		if f.CreatedAt, parseErr = time.Parse(time.RFC3339Nano, createdAt); parseErr != nil {
+			return nil, fmt.Errorf("parse created_at for favorite %s: %w", f.ID, parseErr)
+		}
 		out = append(out, f)
 	}
 	return out, rows.Err()
@@ -165,8 +168,13 @@ func (s *Store) Get(id string) (Row, bool, error) {
 		return Row{}, false, err
 	}
 	r.DevMode = devMode != 0
-	r.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-	r.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+	var parseErr error
+	if r.CreatedAt, parseErr = time.Parse(time.RFC3339Nano, createdAt); parseErr != nil {
+		return Row{}, false, fmt.Errorf("parse created_at for session %s: %w", r.ID, parseErr)
+	}
+	if r.UpdatedAt, parseErr = time.Parse(time.RFC3339Nano, updatedAt); parseErr != nil {
+		return Row{}, false, fmt.Errorf("parse updated_at for session %s: %w", r.ID, parseErr)
+	}
 	return r, true, nil
 }
 
@@ -189,8 +197,13 @@ func (s *Store) List() ([]Row, error) {
 			return nil, err
 		}
 		r.DevMode = devMode != 0
-		r.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-		r.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+		var parseErr error
+		if r.CreatedAt, parseErr = time.Parse(time.RFC3339Nano, createdAt); parseErr != nil {
+			return nil, fmt.Errorf("parse created_at for session %s: %w", r.ID, parseErr)
+		}
+		if r.UpdatedAt, parseErr = time.Parse(time.RFC3339Nano, updatedAt); parseErr != nil {
+			return nil, fmt.Errorf("parse updated_at for session %s: %w", r.ID, parseErr)
+		}
 		out = append(out, r)
 	}
 	return out, rows.Err()

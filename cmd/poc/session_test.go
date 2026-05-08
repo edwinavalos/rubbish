@@ -76,7 +76,7 @@ func (f *fakeBridgeFactory) NewBridge(_ string, _ ssh.Signer) setupRunner { retu
 
 // newTestManager builds a SessionManager with all fakes wired in.
 func newTestManager(snap *fakeSnapshotter, launcher *fakeLauncher, bridge *fakeBridgeFactory) *SessionManager {
-	return newSessionManager(snap, launcher, bridge, nil, "", nil, nil, 4)
+	return newSessionManager(snap, launcher, bridge, nil, "", nil, nil, 4, "")
 }
 
 // waitState polls until the session reaches the target state or times out.

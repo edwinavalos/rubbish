@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/edwinavalos/rubbish/internal/gitutil"
 	"github.com/edwinavalos/rubbish/internal/session"
 	"github.com/edwinavalos/rubbish/internal/sessionstore"
 	"github.com/edwinavalos/rubbish/internal/terminal"
@@ -152,7 +153,7 @@ func main() {
 func sessionStartCmd(repoURL string) string {
 	inner := "claude --dangerously-skip-permissions; exec bash -l"
 	if repoURL != "" {
-		if name := repoName(repoURL); name != "" {
+		if name := gitutil.RepoName(repoURL); name != "" {
 			inner = fmt.Sprintf("cd ~/workspace/%s 2>/dev/null || cd ~; %s", name, inner)
 		}
 	}
@@ -160,14 +161,4 @@ func sessionStartCmd(repoURL string) string {
 	// Keeps claude running through WebSocket disconnects; mouse scrollback is
 	// handled by tmux (set -g mouse on in ~/.tmux.conf).
 	return fmt.Sprintf("bash -l -c 'tmux new-session -A -s rubbish bash -l -c %q'", inner)
-}
-
-func repoName(rawURL string) string {
-	rawURL = strings.TrimRight(rawURL, "/")
-	rawURL = strings.TrimSuffix(rawURL, ".git")
-	idx := strings.LastIndexAny(rawURL, "/:")
-	if idx < 0 || idx == len(rawURL)-1 {
-		return ""
-	}
-	return rawURL[idx+1:]
 }

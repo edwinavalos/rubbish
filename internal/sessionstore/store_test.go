@@ -104,6 +104,133 @@ func TestDeleteNoOp(t *testing.T) {
 	}
 }
 
+func TestGet(t *testing.T) {
+	s := openTmp(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	r := sessionstore.Row{
+		ID:        "get-test",
+		Slot:      2,
+		Status:    "ready",
+		RepoURL:   "https://github.com/user/repo",
+		Branch:    "main",
+		DevMode:   true,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := s.Upsert(r); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	got, ok, err := s.Get("get-test")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !ok {
+		t.Fatal("Get: expected row to exist")
+	}
+	if got.ID != r.ID || got.Status != r.Status || got.DevMode != r.DevMode {
+		t.Errorf("Get returned %+v, want %+v", got, r)
+	}
+}
+
+func TestGet_Missing(t *testing.T) {
+	s := openTmp(t)
+
+	_, ok, err := s.Get("nonexistent")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if ok {
+		t.Error("Get: expected not found for missing ID")
+	}
+}
+
+func TestFavorites(t *testing.T) {
+	s := openTmp(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	favs := []sessionstore.Favorite{
+		{ID: "fav-1", Name: "My Repo", RepoURL: "https://github.com/user/repo", Branch: "main", CreatedAt: now},
+		{ID: "fav-2", Name: "Other", RepoURL: "https://github.com/user/other", Branch: "dev", CreatedAt: now.Add(time.Second)},
+	}
+	for _, f := range favs {
+		if err := s.UpsertFavorite(f); err != nil {
+			t.Fatalf("UpsertFavorite %s: %v", f.ID, err)
+		}
+	}
+
+	list, err := s.ListFavorites()
+	if err != nil {
+		t.Fatalf("ListFavorites: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("want 2 favorites, got %d", len(list))
+	}
+	if list[0].ID != "fav-1" || list[1].ID != "fav-2" {
+		t.Errorf("ordering wrong: got %v, %v", list[0].ID, list[1].ID)
+	}
+	if list[0].Name != "My Repo" || list[0].RepoURL != favs[0].RepoURL {
+		t.Errorf("fav-1 fields wrong: %+v", list[0])
+	}
+}
+
+func TestFavorites_UpsertUpdates(t *testing.T) {
+	s := openTmp(t)
+	now := time.Now().UTC()
+
+	f := sessionstore.Favorite{ID: "fav-upd", Name: "Original", RepoURL: "https://github.com/user/repo", Branch: "main", CreatedAt: now}
+	if err := s.UpsertFavorite(f); err != nil {
+		t.Fatalf("UpsertFavorite: %v", err)
+	}
+
+	f.Name = "Updated"
+	f.Branch = "feature"
+	if err := s.UpsertFavorite(f); err != nil {
+		t.Fatalf("UpsertFavorite update: %v", err)
+	}
+
+	list, err := s.ListFavorites()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("want 1 favorite, got %d", len(list))
+	}
+	if list[0].Name != "Updated" || list[0].Branch != "feature" {
+		t.Errorf("expected updated favorite, got %+v", list[0])
+	}
+}
+
+func TestFavorites_Delete(t *testing.T) {
+	s := openTmp(t)
+	now := time.Now().UTC()
+
+	f := sessionstore.Favorite{ID: "fav-del", Name: "Delete me", RepoURL: "https://github.com/user/repo", Branch: "main", CreatedAt: now}
+	if err := s.UpsertFavorite(f); err != nil {
+		t.Fatalf("UpsertFavorite: %v", err)
+	}
+
+	if err := s.DeleteFavorite("fav-del"); err != nil {
+		t.Fatalf("DeleteFavorite: %v", err)
+	}
+
+	list, err := s.ListFavorites()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 0 {
+		t.Errorf("want 0 favorites after delete, got %d", len(list))
+	}
+}
+
+func TestFavorites_DeleteNoOp(t *testing.T) {
+	s := openTmp(t)
+	if err := s.DeleteFavorite("nonexistent"); err != nil {
+		t.Errorf("DeleteFavorite of missing row: %v", err)
+	}
+}
+
 func TestListOrdering(t *testing.T) {
 	s := openTmp(t)
 	base := time.Now().UTC()

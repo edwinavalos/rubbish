@@ -19,12 +19,7 @@ const (
 	FCBinary   = "/usr/local/bin/firecracker"
 	BridgeName = "br0"
 	VMSSHPort  = 22
-	// Deprecated single-slot constants kept for reference.
-	VMIP       = "172.16.0.2"
-	TapName    = "tap0"
-	SocketPath = "/tmp/rubbish-fc.sock"
-
-	MaxSlots = 4
+	MaxSlots   = 4
 )
 
 // Slot helpers — all per-VM resources are derived from the slot index (0–3).

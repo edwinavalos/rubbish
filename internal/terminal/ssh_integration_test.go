@@ -16,9 +16,10 @@ import (
 // Run with: go test -tags integration ./internal/terminal/ -v
 //
 // Required env vars:
-//   RUBBISH_SSH_KEY  path to the rubbish private key (default: /opt/rubbish/ssh/id_ed25519)
-//   RUBBISH_VM_ADDR  VM IP:port                      (default: 172.16.0.2:22)
-//   RUBBISH_HOST_IP  host IP reachable from inside the VM (default: 172.16.0.1)
+//   RUBBISH_SSH_KEY   path to the rubbish private key (default: /opt/rubbish/ssh/id_ed25519)
+//   RUBBISH_VM_ADDR   VM IP:port                      (default: 172.16.0.2:22)
+//   RUBBISH_HOST_IP   host IP reachable from inside the VM (default: 172.16.0.1)
+//   RUBBISH_HOST_USER host username for VM-to-host SSH test (default: current $USER)
 
 func sshKey(t *testing.T) ssh.Signer {
 	t.Helper()
@@ -49,6 +50,16 @@ func hostIP() string {
 		return v
 	}
 	return "172.16.0.1"
+}
+
+func hostUser() string {
+	if v := os.Getenv("RUBBISH_HOST_USER"); v != "" {
+		return v
+	}
+	if v := os.Getenv("USER"); v != "" {
+		return v
+	}
+	return "claude"
 }
 
 // runOne opens a single SSH session, runs cmd, returns combined stdout+stderr.
@@ -90,8 +101,8 @@ func TestSSHVMToHost(t *testing.T) {
 	// The VM uses the same key for outbound auth.
 	// Dev seed installs the deploy key as id_deploy (not id_ed25519).
 	cmd := fmt.Sprintf(
-		"ssh -o StrictHostKeyChecking=no -o BatchMode=yes -i ~/.ssh/id_deploy edwin@%s 'echo vm-to-host-ok'",
-		hostIP(),
+		"ssh -o StrictHostKeyChecking=no -o BatchMode=yes -i ~/.ssh/id_deploy %s@%s 'echo vm-to-host-ok'",
+		hostUser(), hostIP(),
 	)
 	b := terminal.NewBridge(vmAddr(), "claude", signer)
 	var buf bytes.Buffer
