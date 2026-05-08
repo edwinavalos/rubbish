@@ -320,6 +320,24 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 	bridge := m.bridges.NewBridge(vmAddr, m.signer)
 	sess.bridge = bridge
 
+	// Ensure claude's authorized_keys exists. The new rootfs has this baked in,
+	// but the existing rootfs only has root's key. A root bridge write is
+	// idempotent — it's a no-op when the key is already present.
+	if m.signer != nil {
+		pubKey := strings.TrimRight(string(ssh.MarshalAuthorizedKey(m.signer.PublicKey())), "\n")
+		rootBridge := terminal.NewBridge(vmAddr, "root", m.signer)
+		if err := rootBridge.RunSetup([]string{
+			"passwd -u claude 2>/dev/null || true", // adduser -D locks the account; unlock for key auth
+			"mkdir -p /home/claude/.ssh",
+			"echo " + pubKey + " > /home/claude/.ssh/authorized_keys",
+			"chmod 700 /home/claude/.ssh",
+			"chmod 600 /home/claude/.ssh/authorized_keys",
+			"chown -R claude:claude /home/claude/.ssh",
+		}); err != nil {
+			log.Printf("[session %s] warning: inject claude pubkey: %v", sess.ID[:8], err)
+		}
+	}
+
 	token := githubToken
 	if token == "" && m.prof != nil {
 		if p, err := m.prof.Load(); err == nil {
