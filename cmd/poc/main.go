@@ -719,6 +719,9 @@ func (m *SessionManager) loadFromDB(parentCtx context.Context) {
 	if err := vm.CleanupOrphansExcept(m.maxSlots, liveSlots); err != nil {
 		log.Printf("[startup] cleanup orphans warning: %v", err)
 	}
+
+	// Kill any stray virtiofsd processes from a previous run.
+	vm.CleanupVirtiofsdOrphans()
 }
 
 // normalizeRepoURL converts SSH git URLs to HTTPS so the token credential

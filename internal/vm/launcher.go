@@ -198,6 +198,15 @@ func LaunchWithMounts(ctx context.Context, slot int, rootfsPath string, memMiB i
 
 	// Start virtiofsd processes before booting the VM, so the sockets exist
 	// when Firecracker configures the vhost-user-fs devices.
+	// Skip silently if virtiofsd is not installed — session falls back to
+	// in-VM git clone via the workspacePath == "" branch in boot().
+	if len(mounts) > 0 {
+		if _, err := os.Stat(VirtioFSBinary); err != nil {
+			fmt.Printf("[vm slot=%d] virtiofsd not found at %s — skipping virtio-fs mounts\n", slot, VirtioFSBinary)
+			mounts = nil
+		}
+	}
+
 	var virtiofsdProcs []*exec.Cmd
 	if len(mounts) > 0 {
 		procs, err := startVirtiofsdProcesses(mounts)

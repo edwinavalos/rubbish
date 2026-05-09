@@ -2,11 +2,13 @@ package firecracker
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // deviceUID is the UID that owns created snapshot devices.
@@ -64,7 +66,7 @@ func newSnapshotManager(poolDevice, idPath string, dm dmRunner) (*SnapshotManage
 		return nil, err
 	}
 	if sm.baseVolumeID < 0 {
-		return nil, fmt.Errorf("could not determine base volume ID from rubbish-base-ro device")
+		return nil, fmt.Errorf("rubbish-base-ro not found — run setup-storage.sh to import the base image")
 	}
 	return sm, nil
 }
@@ -116,6 +118,21 @@ func (s *SnapshotManager) discoverState() error {
 		}
 		s.sessions[sessionID] = volID
 	}
+
+	// Reconcile nextVolumeID against discovered sessions so that a counter
+	// file that fell behind (e.g. after manual pool surgery) never causes a
+	// create_snap collision with an existing thin volume.
+	for _, volID := range s.sessions {
+		if volID >= s.nextVolumeID {
+			s.nextVolumeID = volID + 1
+			if err := os.WriteFile(s.idPath, []byte(strconv.Itoa(s.nextVolumeID)), 0644); err != nil {
+				log.Printf("[snapshot] warning: persist reconciled next-volume-id=%d: %v", s.nextVolumeID, err)
+			} else {
+				log.Printf("[snapshot] reconciled next-volume-id → %d", s.nextVolumeID)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -170,7 +187,12 @@ func (s *SnapshotManager) DeleteSnapshot(sessionID string) error {
 	var errs []string
 
 	if out, err := s.dm.run("sudo", "dmsetup", "remove", devName); err != nil {
-		errs = append(errs, fmt.Sprintf("dmsetup remove %s: %s: %v", devName, out, err))
+		// The FC process may still briefly hold an fd to the device after SIGTERM.
+		// Wait 500ms and retry with --force before giving up.
+		time.Sleep(500 * time.Millisecond)
+		if out2, err2 := s.dm.run("sudo", "dmsetup", "remove", "--force", devName); err2 != nil {
+			errs = append(errs, fmt.Sprintf("dmsetup remove %s: %s / force: %s: %v", devName, out, out2, err2))
+		}
 	}
 
 	delMsg := fmt.Sprintf("delete %d", volID)
