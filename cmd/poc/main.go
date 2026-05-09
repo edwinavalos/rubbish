@@ -44,7 +44,9 @@ type snapshotter interface {
 }
 
 type vmLauncher interface {
-	Launch(ctx context.Context, slot int, rootfsPath string, memMiB int64) (vmHandle, error)
+	// Launch boots a VM.  mounts specifies optional host directories to share
+	// with the guest via virtio-fs (Workflow C).  Pass nil for no mounts.
+	Launch(ctx context.Context, slot int, rootfsPath string, memMiB int64, mounts []vm.VirtioFSMount) (vmHandle, error)
 }
 
 type vmHandle interface {
@@ -72,8 +74,8 @@ func (r *realSnapshotter) InjectNetworkConfig(device, ip, gateway string) error 
 
 type realVMLauncher struct{}
 
-func (realVMLauncher) Launch(ctx context.Context, slot int, rootfsPath string, memMiB int64) (vmHandle, error) {
-	return vm.Launch(ctx, slot, rootfsPath, memMiB)
+func (realVMLauncher) Launch(ctx context.Context, slot int, rootfsPath string, memMiB int64, mounts []vm.VirtioFSMount) (vmHandle, error) {
+	return vm.LaunchWithMounts(ctx, slot, rootfsPath, memMiB, mounts)
 }
 
 type realBridgeFactory struct{ signer ssh.Signer }
@@ -92,6 +94,11 @@ type Session struct {
 	DevMode   bool      `json:"dev_mode,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	Error     string    `json:"error,omitempty"`
+
+	// workspacePath is the host-side directory created by the bare-repo local
+	// clone (Workflow C).  It is set during boot() and cleaned up by Stop().
+	// Empty when no repo was requested or when Workflow C is disabled.
+	workspacePath string
 
 	sm     *session.StateMachine
 	v      vmHandle
@@ -141,6 +148,7 @@ type SessionManager struct {
 	prof       *profile.Store
 	store      *sessionstore.Store
 	devHostIP  string // host IP used for NFS mounts in dev-mode sessions
+	repoCache  *gitutil.RepoCache
 }
 
 func NewSessionManager(snapMgr *fc.SnapshotManager, signer ssh.Signer, credPath string, prof *profile.Store, store *sessionstore.Store, maxSlots int, devHostIP string) *SessionManager {
@@ -154,10 +162,11 @@ func NewSessionManager(snapMgr *fc.SnapshotManager, signer ssh.Signer, credPath 
 		store,
 		maxSlots,
 		devHostIP,
+		gitutil.NewRepoCache(gitutil.DefaultReposDir, gitutil.DefaultWorkspacesDir),
 	)
 }
 
-func newSessionManager(snap snapshotter, launcher vmLauncher, bridges bridgeFactory, signer ssh.Signer, credPath string, prof *profile.Store, store *sessionstore.Store, maxSlots int, devHostIP string) *SessionManager {
+func newSessionManager(snap snapshotter, launcher vmLauncher, bridges bridgeFactory, signer ssh.Signer, credPath string, prof *profile.Store, store *sessionstore.Store, maxSlots int, devHostIP string, repoCache *gitutil.RepoCache) *SessionManager {
 	return &SessionManager{
 		sessions:  make(map[string]*Session),
 		usedSlots: make(map[int]bool),
@@ -170,6 +179,7 @@ func newSessionManager(snap snapshotter, launcher vmLauncher, bridges bridgeFact
 		prof:      prof,
 		store:     store,
 		devHostIP: devHostIP,
+		repoCache: repoCache,
 	}
 }
 
@@ -268,7 +278,49 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		log.Printf("[session %s] failed: %v", sess.ID[:8], err)
 	}
 
-	// 1. Create snapshot (Provisioning state)
+	// Resolve the token once — prefer the per-request token, then the stored profile/file.
+	token := githubToken
+	if token == "" && m.prof != nil {
+		if p, err := m.prof.Load(); err == nil {
+			token = p.GitHubToken
+		}
+	}
+	if token == "" {
+		token = loadSavedToken(m.credPath)
+	}
+
+	// 1a. Bare-repo fetch + host-side local clone (Workflow C).
+	//
+	// Done before VM launch so the workspace directory is ready when the VM
+	// starts.  The VM will see it via a virtio-fs mount (wired in launcher.go).
+	// This runs entirely on the host and is fast (hardlinks, no network for the
+	// clone step).
+	if sess.RepoURL != "" && m.repoCache != nil {
+		repoName := gitutil.RepoName(sess.RepoURL)
+		if repoName == "" {
+			repoName = "repo"
+		}
+		log.Printf("[session %s] workflow-c: fetching bare repo %s", sess.ID[:8], sess.RepoURL)
+		barePath, err := m.repoCache.EnsureBareRepo(sess.RepoURL, repoName, token)
+		if err != nil {
+			// Non-fatal: log the error and continue.  The session will still
+			// reach Ready; the workspace just won't have the repo pre-populated.
+			log.Printf("[session %s] warning: bare repo fetch: %v", sess.ID[:8], err)
+		} else {
+			log.Printf("[session %s] workflow-c: local clone %s → workspace", sess.ID[:8], barePath)
+			destPath, err := m.repoCache.LocalClone(barePath, sess.ID, repoName, sess.Branch)
+			if err != nil {
+				log.Printf("[session %s] warning: local clone: %v", sess.ID[:8], err)
+			} else {
+				m.mu.Lock()
+				sess.workspacePath = destPath
+				m.mu.Unlock()
+				log.Printf("[session %s] workflow-c: workspace ready at %s", sess.ID[:8], destPath)
+			}
+		}
+	}
+
+	// 1b. Create snapshot (Provisioning state)
 	device, err := m.snap.CreateSnapshot(sess.ID)
 	if err != nil {
 		fail(fmt.Errorf("create snapshot: %w", err))
@@ -292,7 +344,27 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 	if sess.DevMode {
 		memMiB = 2048
 	}
-	v, err := m.launcher.Launch(ctx, sess.Slot, device, memMiB)
+
+	// Build virtio-fs mounts for Workflow C.
+	// When workspacePath is set, the workspace directory was already cloned on
+	// the host and should be mounted into the VM as the working directory.
+	// The virtiofsd socket is placed in VirtioFSSocketDir and cleaned up by
+	// the VM Stop path.
+	var mounts []vm.VirtioFSMount
+	m.mu.RLock()
+	hostWS := sess.workspacePath
+	m.mu.RUnlock()
+	if hostWS != "" {
+		mounts = []vm.VirtioFSMount{
+			{
+				HostDir:         hostWS,
+				GuestTag:        vm.VirtioFSGuestTag,
+				VirtiofsdSocket: vm.VirtioFSSocket(sess.ID),
+			},
+		}
+	}
+
+	v, err := m.launcher.Launch(ctx, sess.Slot, device, memMiB, mounts)
 	if err != nil {
 		m.snap.DeleteSnapshot(sess.ID) //nolint:errcheck
 		fail(fmt.Errorf("launch vm: %w", err))
@@ -342,15 +414,7 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		}
 	}
 
-	token := githubToken
-	if token == "" && m.prof != nil {
-		if p, err := m.prof.Load(); err == nil {
-			token = p.GitHubToken
-		}
-	}
-	if token == "" {
-		token = loadSavedToken(m.credPath)
-	}
+	// token was resolved at the top of boot() before the snapshot was created.
 	if token != "" {
 		log.Printf("[session %s] setting up git credentials (token len=%d)", sess.ID[:8], len(token))
 		if githubToken != "" {
@@ -369,10 +433,24 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		log.Printf("[session %s] no GitHub token available — private repos will fail to clone", sess.ID[:8])
 	}
 
-	if sess.RepoURL != "" {
+	// Workflow C: the workspace was already cloned on the host before VM boot
+	// and is mounted into the VM via virtio-fs.  When the virtio-fs mount is
+	// fully wired (launcher.go), the VM sees /home/claude/workspace/<repoName>
+	// without any in-VM git clone.
+	//
+	// If virtio-fs is not yet wired (no workspacePath or no mount), fall back
+	// to the legacy in-VM git clone so the session is still usable during the
+	// transition period.
+	m.mu.RLock()
+	wPath := sess.workspacePath
+	m.mu.RUnlock()
+
+	if sess.RepoURL != "" && wPath == "" {
+		// Fallback: virtio-fs not mounted — clone inside the VM the old way.
+		repoName := gitutil.RepoName(sess.RepoURL)
 		cloneDir := "/home/claude/workspace"
-		if name := gitutil.RepoName(sess.RepoURL); name != "" {
-			cloneDir = "/home/claude/workspace/" + name
+		if repoName != "" {
+			cloneDir = "/home/claude/workspace/" + repoName
 		}
 		var cloneCmd string
 		if sess.Branch != "" {
@@ -380,12 +458,14 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		} else {
 			cloneCmd = fmt.Sprintf("git clone %s %s", sess.RepoURL, cloneDir)
 		}
-		log.Printf("[session %s] cloning %s → %s", sess.ID[:8], sess.RepoURL, cloneDir)
+		log.Printf("[session %s] fallback: in-vm clone %s → %s", sess.ID[:8], sess.RepoURL, cloneDir)
 		if err := bridge.RunSetup([]string{cloneCmd}); err != nil {
 			log.Printf("[session %s] warning: git clone: %v", sess.ID[:8], err)
 		} else {
-			log.Printf("[session %s] clone complete: %s", sess.ID[:8], cloneDir)
+			log.Printf("[session %s] fallback clone complete: %s", sess.ID[:8], cloneDir)
 		}
+	} else if wPath != "" {
+		log.Printf("[session %s] workflow-c: workspace mounted at %s (no in-vm clone needed)", sess.ID[:8], wPath)
 	}
 
 	// Set a unique per-session hostname so the prompt shows the session ID.
@@ -486,6 +566,12 @@ func (m *SessionManager) Stop(id string) error {
 	}
 	m.snap.DeleteSnapshot(id) //nolint:errcheck
 	m.freeSlot(sess.Slot)
+
+	// Workflow C: clean up the host-side workspace directory now that the VM
+	// (and its virtio-fs mount) is gone.
+	if m.repoCache != nil {
+		m.repoCache.CleanupWorkspace(id)
+	}
 
 	if sess.sm.State() == session.StateStopping {
 		sess.sm.Transition(session.StateStopped) //nolint:errcheck

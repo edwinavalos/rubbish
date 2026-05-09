@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/edwinavalos/rubbish/internal/session"
+	"github.com/edwinavalos/rubbish/internal/vm"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -55,7 +56,7 @@ type fakeLauncher struct {
 	launchN   atomic.Int32
 }
 
-func (f *fakeLauncher) Launch(_ context.Context, _ int, _ string, _ int64) (vmHandle, error) {
+func (f *fakeLauncher) Launch(_ context.Context, _ int, _ string, _ int64, _ []vm.VirtioFSMount) (vmHandle, error) {
 	f.launchN.Add(1)
 	if f.launchErr != nil {
 		return nil, f.launchErr
@@ -76,7 +77,7 @@ func (f *fakeBridgeFactory) NewBridge(_ string, _ ssh.Signer) setupRunner { retu
 
 // newTestManager builds a SessionManager with all fakes wired in.
 func newTestManager(snap *fakeSnapshotter, launcher *fakeLauncher, bridge *fakeBridgeFactory) *SessionManager {
-	return newSessionManager(snap, launcher, bridge, nil, "", nil, nil, 4, "")
+	return newSessionManager(snap, launcher, bridge, nil, "", nil, nil, 4, "", nil)
 }
 
 // waitState polls until the session reaches the target state or times out.
