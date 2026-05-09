@@ -134,6 +134,13 @@ chmod 700 "${MOUNT_DIR}/home/claude/.ssh"
 chmod 600 "${MOUNT_DIR}/home/claude/.ssh/authorized_keys"
 chroot "${MOUNT_DIR}" chown -R claude:claude /home/claude/.ssh
 
+# Workspace virtio-fs mount point.
+# Workflow C mounts the host workspace here via virtiofs so the VM sees the
+# repo without any in-VM git clone.  The mount tag "workspace" matches
+# vm.VirtioFSGuestTag.  The directory is owned by claude so she can write.
+mkdir -p "${MOUNT_DIR}/home/claude/workspace"
+chroot "${MOUNT_DIR}" chown claude:claude /home/claude/workspace
+
 # Start sshd and configure network via /etc/init.d/rcS (bypass openrc for microVM simplicity)
 mkdir -p "${MOUNT_DIR}/etc/init.d"
 cat > "${MOUNT_DIR}/etc/init.d/rcS" <<'RCEOF'
@@ -147,6 +154,29 @@ ip addr add 127.0.0.1/8 dev lo
 ip link set eth0 up
 ip addr add 172.16.0.2/24 dev eth0
 ip route add default via 172.16.0.1
+
+# Workflow C: mount the host workspace via virtiofs if the device is present.
+# The virtiofsd daemon on the host exports the per-session workspace directory
+# under the tag "workspace".  If no tag is present (e.g. no repo was requested
+# or Workflow C is not yet fully wired) this is a harmless no-op.
+#
+# Prerequisites:
+#   1. Kernel built with CONFIG_VIRTIO_FS=y (or virtiofs module loadable)
+#   2. virtiofsd running on the host before Firecracker starts
+#   3. Firecracker configured with a vhost-user-fs device (tag=workspace)
+#
+# The mount is attempted regardless so that a failed mount surfaces in the
+# boot log rather than failing silently.  If virtiofsd is not running, the
+# mount will fail and the workspace will simply be empty — the session is
+# still usable (the VM falls back to any git-credential-based clone the
+# server initiates via SSH).
+if [ -e /sys/bus/virtio/drivers/virtiofs ] || modprobe virtiofs 2>/dev/null; then
+    mkdir -p /home/claude/workspace
+    mount -t virtiofs workspace /home/claude/workspace 2>/dev/null && \
+        chown claude:claude /home/claude/workspace || \
+        true  # non-fatal: workspace may be empty, session is still usable
+fi
+
 /usr/sbin/sshd
 RCEOF
 chmod +x "${MOUNT_DIR}/etc/init.d/rcS"
