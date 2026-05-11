@@ -44,9 +44,7 @@ type snapshotter interface {
 }
 
 type vmLauncher interface {
-	// Launch boots a VM.  mounts specifies optional host directories to share
-	// with the guest via virtio-fs (Workflow C).  Pass nil for no mounts.
-	Launch(ctx context.Context, slot int, rootfsPath string, memMiB int64, mounts []vm.VirtioFSMount) (vmHandle, error)
+	Launch(ctx context.Context, slot int, rootfsPath string, memMiB int64) (vmHandle, error)
 }
 
 type vmHandle interface {
@@ -74,8 +72,8 @@ func (r *realSnapshotter) InjectNetworkConfig(device, ip, gateway string) error 
 
 type realVMLauncher struct{}
 
-func (realVMLauncher) Launch(ctx context.Context, slot int, rootfsPath string, memMiB int64, mounts []vm.VirtioFSMount) (vmHandle, error) {
-	return vm.LaunchWithMounts(ctx, slot, rootfsPath, memMiB, mounts)
+func (realVMLauncher) Launch(ctx context.Context, slot int, rootfsPath string, memMiB int64) (vmHandle, error) {
+	return vm.Launch(ctx, slot, rootfsPath, memMiB)
 }
 
 type realBridgeFactory struct{ signer ssh.Signer }
@@ -357,27 +355,8 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		memMiB = 2048
 	}
 
-	// Build virtio-fs mounts for Workflow C.
-	// When workspacePath is set, the workspace directory was already cloned on
-	// the host and should be mounted into the VM as the working directory.
-	// The virtiofsd socket is placed in VirtioFSSocketDir and cleaned up by
-	// the VM Stop path.
-	var mounts []vm.VirtioFSMount
-	m.mu.RLock()
-	hostWS := sess.workspacePath
-	m.mu.RUnlock()
-	if hostWS != "" {
-		mounts = []vm.VirtioFSMount{
-			{
-				HostDir:         hostWS,
-				GuestTag:        vm.VirtioFSGuestTag,
-				VirtiofsdSocket: vm.VirtioFSSocket(sess.ID),
-			},
-		}
-	}
-
 	stepT = time.Now()
-	v, err := m.launcher.Launch(ctx, sess.Slot, device, memMiB, mounts)
+	v, err := m.launcher.Launch(ctx, sess.Slot, device, memMiB)
 	t("launch_vm", stepT)
 	if err != nil {
 		m.snap.DeleteSnapshot(sess.ID) //nolint:errcheck
@@ -453,36 +432,26 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		log.Printf("[session %s] no GitHub token available — private repos will fail to clone", sid)
 	}
 
-	// Workflow C: the workspace was already cloned on the host before VM boot
-	// and is mounted into the VM via virtio-fs.  When the virtio-fs mount is
-	// fully wired (launcher.go), the VM sees /home/claude/workspace/<repoName>
-	// without any in-VM git clone.
-	//
-	// If virtio-fs is not yet wired (no workspacePath or no mount), fall back
-	// to the legacy in-VM git clone so the session is still usable during the
-	// transition period.
-	m.mu.RLock()
-	wPath := sess.workspacePath
-	m.mu.RUnlock()
-
-	if sess.RepoURL != "" && wPath == "" {
-		// Fallback: virtio-fs not mounted — clone inside the VM the old way.
+	// Mount the workspace into the VM via NFS and verify it landed.
+	// workspacePath is set when the host-side bare-repo clone succeeded.
+	if sess.RepoURL != "" {
 		repoName := gitutil.RepoName(sess.RepoURL)
-		cloneDir := "/home/claude/workspace"
-		if repoName != "" {
-			cloneDir = "/home/claude/workspace/" + repoName
+		if repoName == "" {
+			repoName = "repo"
 		}
-		var cloneCmd string
-		if sess.Branch != "" {
-			cloneCmd = fmt.Sprintf("git clone -b %s %s %s", sess.Branch, sess.RepoURL, cloneDir)
-		} else {
-			cloneCmd = fmt.Sprintf("git clone %s %s", sess.RepoURL, cloneDir)
+		m.mu.RLock()
+		hostWS := sess.workspacePath
+		m.mu.RUnlock()
+		if hostWS == "" {
+			fail(fmt.Errorf("workspace not prepared for %s: bare-repo clone failed earlier", sess.RepoURL))
+			return
 		}
 		stepT = time.Now()
-		if err := bridge.RunSetup([]string{cloneCmd}); err != nil {
-			log.Printf("[session %s] warning: git clone: %v", sid, err)
+		if err := mountWorkspace(bridge, m.devHostIP, hostWS, repoName); err != nil {
+			fail(fmt.Errorf("mount workspace: %w", err))
+			return
 		}
-		t("configure_clone (in-vm)", stepT)
+		t("mount_workspace", stepT)
 	}
 
 	// Set a unique per-session hostname so the prompt shows the session ID.
@@ -748,8 +717,6 @@ func (m *SessionManager) loadFromDB(parentCtx context.Context) {
 		log.Printf("[startup] cleanup orphans warning: %v", err)
 	}
 
-	// Kill any stray virtiofsd processes from a previous run.
-	vm.CleanupVirtiofsdOrphans()
 }
 
 // normalizeRepoURL converts SSH git URLs to HTTPS so the token credential
@@ -770,6 +737,17 @@ const devSeedDir = "/opt/rubbish/dev-seed"
 
 // nfsBase is the host path exported via NFS for shared Claude memory.
 const nfsBase = "/opt/rubbish/claude-shared"
+
+// mountWorkspace NFS-mounts the session's host workspace directory into the VM
+// at /home/claude/workspace/<repoName>.  The host must export
+// /opt/rubbish/workspaces via NFS to the VM bridge subnet.
+func mountWorkspace(bridge setupRunner, hostIP, hostPath, repoName string) error {
+	guestMount := "/home/claude/workspace/" + repoName
+	return bridge.RunSetup([]string{
+		"sudo mkdir -p " + guestMount,
+		fmt.Sprintf("sudo mount -t nfs %s:%s %s -o vers=4,noatime,soft", hostIP, hostPath, guestMount),
+	})
+}
 
 // seedDevFiles injects developer context into a VM:
 //   - Global CLAUDE.md — base64-injected (static, no sync needed)

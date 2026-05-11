@@ -162,6 +162,13 @@ func (c *RepoCache) LocalClone(barePath, sessionID, repoName, branch string) (st
 	}
 
 	log.Printf("[repocache] local clone complete: %s", dest)
+
+	// Chown to UID/GID 1000 (the claude user inside every VM) so the NFS
+	// mount is writable without root_squash gymnastics.
+	if out, err := exec.Command("chown", "-R", "1000:1000", dest).CombinedOutput(); err != nil {
+		log.Printf("[repocache] warning: chown workspace %s: %s: %v", dest, out, err)
+	}
+
 	return dest, nil
 }
 

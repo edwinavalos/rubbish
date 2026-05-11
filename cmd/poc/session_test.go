@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/edwinavalos/rubbish/internal/session"
-	"github.com/edwinavalos/rubbish/internal/vm"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -56,7 +55,7 @@ type fakeLauncher struct {
 	launchN   atomic.Int32
 }
 
-func (f *fakeLauncher) Launch(_ context.Context, _ int, _ string, _ int64, _ []vm.VirtioFSMount) (vmHandle, error) {
+func (f *fakeLauncher) Launch(_ context.Context, _ int, _ string, _ int64) (vmHandle, error) {
 	f.launchN.Add(1)
 	if f.launchErr != nil {
 		return nil, f.launchErr

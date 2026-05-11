@@ -37,22 +37,6 @@ func IsSocketAlive(slot int) bool {
 	return strings.TrimSpace(string(out)) != ""
 }
 
-// CleanupVirtiofsdOrphans kills any stray virtiofsd processes that are holding
-// sockets in VirtioFSSocketDir and removes the stale socket files. Safe to
-// call at startup even when no virtiofsd processes are running.
-func CleanupVirtiofsdOrphans() {
-	matches, _ := filepath.Glob(filepath.Join(VirtioFSSocketDir, "*.sock"))
-	for _, sock := range matches {
-		out, err := exec.Command("lsof", "-t", sock).Output()
-		if err == nil {
-			if pid, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil {
-				killProcess(pid)
-			}
-		}
-		os.Remove(sock) //nolint:errcheck
-	}
-}
-
 // CleanupOrphans kills stray Firecracker processes and tears down their TAP
 // devices. Safe to call at startup even if no orphans exist.
 func CleanupOrphans(maxSlots int) error {
