@@ -372,6 +372,23 @@ func (v *VM) WaitForSSH(ctx context.Context) error {
 	return fmt.Errorf("ssh on %s did not open within 30s", addr)
 }
 
+// WaitForVMDead blocks until port 22 at ip stops accepting connections, or
+// until 5 seconds elapse (logging a warning). Called after Stop() to ensure
+// the slot is not reused while the dying VM's SSH is still answering.
+func WaitForVMDead(ip string) {
+	addr := fmt.Sprintf("%s:%d", ip, VMSSHPort)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err != nil {
+			return // port closed — VM is gone
+		}
+		conn.Close()
+		time.Sleep(100 * time.Millisecond)
+	}
+	fmt.Printf("[vm] warning: %s still reachable 5s after stop — slot reuse may cause session collision\n", addr)
+}
+
 func (v *VM) Stop(ctx context.Context) error {
 	// Attempt graceful shutdown first; ignore error since we'll kill the process anyway.
 	v.machine.Shutdown(ctx) //nolint:errcheck

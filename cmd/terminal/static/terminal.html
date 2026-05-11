@@ -303,7 +303,13 @@
     ws = new WebSocket(`${proto}://${location.host}/ws/${id}`);
     ws.binaryType = 'arraybuffer';
 
+    // Track whether the upgrade handshake succeeded. If the server rejects
+    // (e.g. 503 "session not ready"), onopen never fires and wsOpened stays
+    // false — we treat that as "VM still booting" and auto-retry silently.
+    let wsOpened = false;
+
     ws.onopen = () => {
+      wsOpened = true;
       autoReconnecting = false;
       reconnectAttempts = 0;
       setStatus('');
@@ -328,12 +334,21 @@
 
     ws.onclose = () => {
       if (autoReconnecting) { scheduleReconnect(); return; }
+      if (!wsOpened) {
+        // Server rejected before upgrade — VM not ready yet. Auto-retry
+        // without showing the overlay; print the message only on the first attempt.
+        if (reconnectAttempts === 1) {
+          term.write('\x1b[33mWaiting for VM to be ready…\x1b[0m\r\n');
+        }
+        scheduleReconnect();
+        return;
+      }
       term.write('\r\n\x1b[31m[Connection closed]\x1b[0m\r\n');
       reconnectOverlay.style.display = 'flex';
     };
 
     ws.onerror = () => {
-      if (autoReconnecting) return; // onclose handles the retry
+      if (autoReconnecting || !wsOpened) return; // onclose handles the retry
       term.write('\r\n\x1b[31m[WebSocket error — connection failed]\x1b[0m\r\n');
       reconnectOverlay.style.display = 'flex';
     };

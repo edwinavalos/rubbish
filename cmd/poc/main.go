@@ -269,13 +269,22 @@ func (m *SessionManager) Create(parentCtx context.Context, repoURL, branch, gith
 }
 
 func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken string) {
+	bootStart := time.Now()
+	sid := sess.ID[:8]
+
+	// t logs how long a named step took and returns the current time for the next step.
+	t := func(step string, since time.Time) time.Time {
+		log.Printf("[session %s] %-28s %s", sid, step, time.Since(since).Round(time.Millisecond))
+		return time.Now()
+	}
+
 	fail := func(err error) {
 		m.mu.Lock()
 		sess.Error = err.Error()
 		delete(m.usedSlots, sess.Slot)
 		m.mu.Unlock()
 		sess.sm.Transition(session.StateFailed) //nolint:errcheck — hook persists
-		log.Printf("[session %s] failed: %v", sess.ID[:8], err)
+		log.Printf("[session %s] failed: %v", sid, err)
 	}
 
 	// Resolve the token once — prefer the per-request token, then the stored profile/file.
@@ -300,44 +309,47 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		if repoName == "" {
 			repoName = "repo"
 		}
-		log.Printf("[session %s] workflow-c: fetching bare repo %s", sess.ID[:8], sess.RepoURL)
+		stepT := time.Now()
 		barePath, err := m.repoCache.EnsureBareRepo(sess.RepoURL, repoName, token)
+		stepT = t("repo_fetch", stepT)
 		if err != nil {
-			// Non-fatal: log the error and continue.  The session will still
-			// reach Ready; the workspace just won't have the repo pre-populated.
-			log.Printf("[session %s] warning: bare repo fetch: %v", sess.ID[:8], err)
+			log.Printf("[session %s] warning: bare repo fetch: %v", sid, err)
 		} else {
-			log.Printf("[session %s] workflow-c: local clone %s → workspace", sess.ID[:8], barePath)
 			destPath, err := m.repoCache.LocalClone(barePath, sess.ID, repoName, sess.Branch)
+			t("local_clone", stepT)
 			if err != nil {
-				log.Printf("[session %s] warning: local clone: %v", sess.ID[:8], err)
+				log.Printf("[session %s] warning: local clone: %v", sid, err)
 			} else {
 				m.mu.Lock()
 				sess.workspacePath = destPath
 				m.mu.Unlock()
-				log.Printf("[session %s] workflow-c: workspace ready at %s", sess.ID[:8], destPath)
 			}
 		}
 	}
 
 	// 1b. Create snapshot (Provisioning state)
+	stepT := time.Now()
 	device, err := m.snap.CreateSnapshot(sess.ID)
+	t("snapshot_create", stepT)
 	if err != nil {
 		fail(fmt.Errorf("create snapshot: %w", err))
 		return
 	}
 
 	// 2. Inject network config (still Provisioning)
+	stepT = time.Now()
 	if err := m.snap.InjectNetworkConfig(device, vm.SlotIP(sess.Slot), "172.16.0.1"); err != nil {
+		t("inject_network", stepT)
 		m.snap.DeleteSnapshot(sess.ID) //nolint:errcheck
 		fail(fmt.Errorf("inject network: %w", err))
 		return
 	}
+	t("inject_network", stepT)
 
 	// 3. Boot VM → Booting
 	if err := sess.sm.Transition(session.StateBooting); err != nil {
 		m.snap.DeleteSnapshot(sess.ID) //nolint:errcheck
-		log.Printf("[session %s] transition error: %v", sess.ID[:8], err)
+		log.Printf("[session %s] transition error: %v", sid, err)
 		return
 	}
 	memMiB := int64(512)
@@ -364,7 +376,9 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		}
 	}
 
+	stepT = time.Now()
 	v, err := m.launcher.Launch(ctx, sess.Slot, device, memMiB, mounts)
+	t("launch_vm", stepT)
 	if err != nil {
 		m.snap.DeleteSnapshot(sess.ID) //nolint:errcheck
 		fail(fmt.Errorf("launch vm: %w", err))
@@ -376,19 +390,22 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 	if err := sess.sm.Transition(session.StateWaitingSSH); err != nil {
 		v.Stop(ctx)                    //nolint:errcheck
 		m.snap.DeleteSnapshot(sess.ID) //nolint:errcheck
-		log.Printf("[session %s] transition error: %v", sess.ID[:8], err)
+		log.Printf("[session %s] transition error: %v", sid, err)
 		return
 	}
+	stepT = time.Now()
 	if err := v.WaitForSSH(ctx); err != nil {
+		t("wait_ssh", stepT)
 		v.Stop(ctx)                    //nolint:errcheck
 		m.snap.DeleteSnapshot(sess.ID) //nolint:errcheck
 		fail(fmt.Errorf("wait for ssh: %w", err))
 		return
 	}
+	t("wait_ssh", stepT)
 
 	// 5. Git setup → Configuring
 	if err := sess.sm.Transition(session.StateConfiguring); err != nil {
-		log.Printf("[session %s] transition error: %v", sess.ID[:8], err)
+		log.Printf("[session %s] transition error: %v", sid, err)
 		return
 	}
 
@@ -402,6 +419,7 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 	if m.signer != nil {
 		pubKey := strings.TrimRight(string(ssh.MarshalAuthorizedKey(m.signer.PublicKey())), "\n")
 		rootBridge := terminal.NewBridge(vmAddr, "root", m.signer)
+		stepT = time.Now()
 		if err := rootBridge.RunSetup([]string{
 			"passwd -u claude 2>/dev/null || true", // adduser -D locks the account; unlock for key auth
 			"mkdir -p /home/claude/.ssh",
@@ -410,27 +428,29 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 			"chmod 600 /home/claude/.ssh/authorized_keys",
 			"chown -R claude:claude /home/claude/.ssh",
 		}); err != nil {
-			log.Printf("[session %s] warning: inject claude pubkey: %v", sess.ID[:8], err)
+			log.Printf("[session %s] warning: inject claude pubkey: %v", sid, err)
 		}
+		t("configure_key", stepT)
 	}
 
 	// token was resolved at the top of boot() before the snapshot was created.
 	if token != "" {
-		log.Printf("[session %s] setting up git credentials (token len=%d)", sess.ID[:8], len(token))
 		if githubToken != "" {
 			if err := saveToken(m.credPath, githubToken); err != nil {
-				log.Printf("[session %s] warning: save token: %v", sess.ID[:8], err)
+				log.Printf("[session %s] warning: save token: %v", sid, err)
 			}
 		}
 		cmds := []string{
 			"git config --global credential.helper store",
 			fmt.Sprintf(`printf 'https://oauth2:%s@github.com\n' > ~/.git-credentials`, token),
 		}
+		stepT = time.Now()
 		if err := bridge.RunSetup(cmds); err != nil {
-			log.Printf("[session %s] warning: git credential setup: %v", sess.ID[:8], err)
+			log.Printf("[session %s] warning: git credential setup: %v", sid, err)
 		}
+		t("configure_git", stepT)
 	} else {
-		log.Printf("[session %s] no GitHub token available — private repos will fail to clone", sess.ID[:8])
+		log.Printf("[session %s] no GitHub token available — private repos will fail to clone", sid)
 	}
 
 	// Workflow C: the workspace was already cloned on the host before VM boot
@@ -458,26 +478,24 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		} else {
 			cloneCmd = fmt.Sprintf("git clone %s %s", sess.RepoURL, cloneDir)
 		}
-		log.Printf("[session %s] fallback: in-vm clone %s → %s", sess.ID[:8], sess.RepoURL, cloneDir)
+		stepT = time.Now()
 		if err := bridge.RunSetup([]string{cloneCmd}); err != nil {
-			log.Printf("[session %s] warning: git clone: %v", sess.ID[:8], err)
-		} else {
-			log.Printf("[session %s] fallback clone complete: %s", sess.ID[:8], cloneDir)
+			log.Printf("[session %s] warning: git clone: %v", sid, err)
 		}
-	} else if wPath != "" {
-		log.Printf("[session %s] workflow-c: workspace mounted at %s (no in-vm clone needed)", sess.ID[:8], wPath)
+		t("configure_clone (in-vm)", stepT)
 	}
 
 	// Set a unique per-session hostname so the prompt shows the session ID.
 	// claude has NOPASSWD sudo baked into the rootfs, so no privilege escalation needed.
-	shortID := sess.ID[:8]
-	vmHostname := "rubbish-" + shortID
+	vmHostname := "rubbish-" + sid
+	stepT = time.Now()
 	if err := bridge.RunSetup([]string{
 		"sudo hostname " + vmHostname,
 		"echo " + vmHostname + " | sudo tee /etc/hostname > /dev/null",
 	}); err != nil {
-		log.Printf("[session %s] warning: set hostname: %v", sess.ID[:8], err)
+		log.Printf("[session %s] warning: set hostname: %v", sid, err)
 	}
+	t("configure_hostname", stepT)
 
 	// Inject profile credentials into the VM environment.
 	if m.prof != nil {
@@ -488,26 +506,29 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 				`printf '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.29"}\n' > ~/.claude.json`,
 				"chmod 600 ~/.claude.json",
 			}
+			stepT = time.Now()
 			if err := bridge.RunSetup(cmds); err != nil {
-				log.Printf("[session %s] warning: inject credentials: %v", sess.ID[:8], err)
+				log.Printf("[session %s] warning: inject credentials: %v", sid, err)
 			}
+			t("configure_profile", stepT)
 		}
 	}
 
 	// 6. Dev seed (optional)
 	if sess.DevMode {
-		log.Printf("[session %s] seeding dev files", sess.ID[:8])
+		stepT = time.Now()
 		if err := seedDevFiles(bridge, m.devHostIP); err != nil {
-			log.Printf("[session %s] warning: dev seed: %v", sess.ID[:8], err)
+			log.Printf("[session %s] warning: dev seed: %v", sid, err)
 		}
+		t("configure_seed", stepT)
 	}
 
 	// 7. Ready
 	if err := sess.sm.Transition(session.StateReady); err != nil {
-		log.Printf("[session %s] transition error: %v", sess.ID[:8], err)
+		log.Printf("[session %s] transition error: %v", sid, err)
 		return
 	}
-	log.Printf("[session %s] ready (slot=%d ip=%s)", sess.ID[:8], sess.Slot, vm.SlotIP(sess.Slot))
+	log.Printf("[session %s] ready (slot=%d ip=%s) total=%s", sid, sess.Slot, vm.SlotIP(sess.Slot), time.Since(bootStart).Round(time.Millisecond))
 }
 
 func (m *SessionManager) Get(id string) (*Session, bool) {
@@ -560,9 +581,16 @@ func (m *SessionManager) Stop(id string) error {
 
 	sess.cancel()
 	if sess.v != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		sess.v.Stop(ctx) //nolint:errcheck
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer stopCancel()
+		if err := sess.v.Stop(stopCtx); err != nil {
+			log.Printf("[session %s] stop vm: %v", id[:8], err)
+		}
+		// Wait until port 22 stops answering before freeing the slot.
+		// Without this a new session can grab the same slot and have its
+		// WaitForSSH succeed immediately against the dying VM, running all
+		// configure steps on the wrong machine.
+		vm.WaitForVMDead(vm.SlotIP(sess.Slot))
 	}
 	m.snap.DeleteSnapshot(id) //nolint:errcheck
 	m.freeSlot(sess.Slot)
