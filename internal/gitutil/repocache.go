@@ -139,9 +139,12 @@ func (c *RepoCache) EnsureBareRepo(repoURL, repoName, token string) (string, err
 // data copied).  The destination is WorkspaceRepoDir(sessionID, repoName).
 //
 // If branch is non-empty, -b <branch> is passed to git clone.
+// repoURL is the canonical remote URL (e.g. https://github.com/user/repo.git).
+// After cloning, origin is repointed to repoURL so that git commands inside
+// the VM work against the real remote, not the host-local bare repo path.
 //
 // Returns the path to the cloned directory.
-func (c *RepoCache) LocalClone(barePath, sessionID, repoName, branch string) (string, error) {
+func (c *RepoCache) LocalClone(barePath, sessionID, repoName, branch, repoURL string) (string, error) {
 	wsDir := c.WorkspaceDir(sessionID)
 	if err := os.MkdirAll(wsDir, 0755); err != nil {
 		return "", fmt.Errorf("create workspace dir %s: %w", wsDir, err)
@@ -162,6 +165,15 @@ func (c *RepoCache) LocalClone(barePath, sessionID, repoName, branch string) (st
 	}
 
 	log.Printf("[repocache] local clone complete: %s", dest)
+
+	// Repoint origin to the canonical remote URL so git commands inside the VM
+	// work against the real remote.  git clone --local sets origin to the
+	// host-side bare repo path, which doesn't exist inside the VM.
+	if repoURL != "" {
+		if out, err := exec.Command("git", "-C", dest, "remote", "set-url", "origin", repoURL).CombinedOutput(); err != nil {
+			log.Printf("[repocache] warning: set remote origin %s: %s: %v", dest, out, err)
+		}
+	}
 
 	// Chown to UID/GID 1000 (the claude user inside every VM) so the NFS
 	// mount is writable without root_squash gymnastics.

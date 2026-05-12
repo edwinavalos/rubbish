@@ -313,7 +313,7 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		if err != nil {
 			log.Printf("[session %s] warning: bare repo fetch: %v", sid, err)
 		} else {
-			destPath, err := m.repoCache.LocalClone(barePath, sess.ID, repoName, sess.Branch)
+			destPath, err := m.repoCache.LocalClone(barePath, sess.ID, repoName, sess.Branch, sess.RepoURL)
 			t("local_clone", stepT)
 			if err != nil {
 				log.Printf("[session %s] warning: local clone: %v", sid, err)
