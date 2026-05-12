@@ -568,10 +568,6 @@ func (m *SessionManager) Stop(id string) error {
 		m.snap.DeleteSnapshot(id) //nolint:errcheck
 		m.freeSlot(sess.Slot)
 
-		if m.repoCache != nil {
-			m.repoCache.CleanupWorkspace(id)
-		}
-
 		sess.sm.Transition(session.StateStopped) //nolint:errcheck
 
 		m.mu.Lock()
@@ -581,6 +577,14 @@ func (m *SessionManager) Stop(id string) error {
 			m.store.Delete(id) //nolint:errcheck
 		}
 		log.Printf("[session %s] stopped and removed", id[:8])
+
+		// NFS workspace cleanup runs last: if the VM died while holding the
+		// NFS mount open, os.RemoveAll blocks until the NFS server TCP-keepalive
+		// times out the dead client (~60-90s). Doing this after the session is
+		// removed from the map means users see "stopped" immediately.
+		if m.repoCache != nil {
+			m.repoCache.CleanupWorkspace(id)
+		}
 	}()
 
 	return nil
