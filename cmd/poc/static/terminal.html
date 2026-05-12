@@ -207,6 +207,7 @@
   term.focus();
 
   // ── Clipboard ──────────────────────────────────────────────────────────────
+  // navigator.clipboard requires HTTPS; fallbackCopy works on plain HTTP too.
   function copyText(text) {
     if (!text) return;
     if (navigator.clipboard) {
@@ -226,20 +227,36 @@
     document.body.removeChild(ta);
   }
 
-  // Auto-copy selection to system clipboard
-  term.onSelectionChange(() => copyText(term.getSelection()));
+  function sendText(text) {
+    if (text && ws && ws.readyState === WebSocket.OPEN) ws.send(text);
+  }
 
-  // Right-click: suppress browser menu, paste from clipboard
+  // Copy selected text on mouseup (more reliable than onSelectionChange which
+  // fires on every mouse-move during selection).
+  document.getElementById('terminal').addEventListener('mouseup', () => {
+    const sel = term.getSelection();
+    if (sel) copyText(sel);
+  });
+
+  // Native paste event works on HTTP (no Clipboard API permission needed).
+  // Catches Ctrl+V / Cmd+V at the OS level and right-click → Paste.
+  document.addEventListener('paste', e => {
+    const text = e.clipboardData?.getData('text');
+    if (text) { e.preventDefault(); sendText(text); }
+  });
+
+  // Right-click: suppress browser menu; try Clipboard API (HTTPS) then
+  // fall back to prompting — better than silently doing nothing.
   document.getElementById('terminal').addEventListener('contextmenu', e => {
     e.preventDefault();
     if (navigator.clipboard) {
-      navigator.clipboard.readText().then(text => {
-        if (text && ws && ws.readyState === WebSocket.OPEN) ws.send(text);
-      }).catch(() => {});
+      navigator.clipboard.readText().then(sendText).catch(() => {});
     }
+    // On HTTP the native paste event (above) handles right-click → Paste
+    // in browsers that route it through the paste event.
   });
 
-  // Ctrl+Shift+C / Cmd+C: copy; Ctrl+Shift+V / Cmd+V: paste
+  // Ctrl+Shift+C / Cmd+C: explicit copy shortcut.
   term.attachCustomKeyEventHandler(e => {
     if (e.type !== 'keydown') return true;
     if ((e.ctrlKey && e.shiftKey && e.code === 'KeyC') ||
@@ -247,13 +264,15 @@
       copyText(term.getSelection());
       return false;
     }
+    // Ctrl+Shift+V / Cmd+V: explicit paste shortcut (HTTPS only; HTTP uses
+    // the native paste event handler above instead).
     if ((e.ctrlKey && e.shiftKey && e.code === 'KeyV') || (e.metaKey && e.code === 'KeyV')) {
       if (navigator.clipboard) {
-        navigator.clipboard.readText().then(text => {
-          if (text && ws && ws.readyState === WebSocket.OPEN) ws.send(text);
-        }).catch(() => {});
+        navigator.clipboard.readText().then(sendText).catch(() => {});
+        return false;
       }
-      return false;
+      // On HTTP, let the keydown propagate so the browser fires the paste event.
+      return true;
     }
     return true;
   });
