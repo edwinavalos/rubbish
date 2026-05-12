@@ -542,37 +542,47 @@ func (m *SessionManager) Stop(id string) error {
 			}
 			return nil
 		case session.StateStopping:
+			// Cleanup goroutine already running; caller gets success immediately.
 			return nil
 		default:
 			return err
 		}
 	}
 
-	sess.cancel()
-	if sess.v != nil {
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), 8*time.Second)
-		defer stopCancel()
-		if err := sess.v.Stop(stopCtx); err != nil {
-			log.Printf("[session %s] stop vm: %v", id[:8], err)
+	// Run the blocking cleanup (VM shutdown, dmsetup, workspace removal) in a
+	// goroutine so the HTTP DELETE handler returns immediately.  The session
+	// stays in the map as StateStopping until the goroutine finishes.
+	go func() {
+		sess.cancel()
+		if sess.v != nil {
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), 8*time.Second)
+			if err := sess.v.Stop(stopCtx); err != nil {
+				log.Printf("[session %s] stop vm: %v", id[:8], err)
+			}
+			stopCancel()
+			// Wait until port 22 stops answering before freeing the slot.
+			// Without this a new session can grab the same slot and have its
+			// WaitForSSH succeed immediately against the dying VM.
+			vm.WaitForVMDead(vm.SlotIP(sess.Slot))
 		}
-		// Wait until port 22 stops answering before freeing the slot.
-		// Without this a new session can grab the same slot and have its
-		// WaitForSSH succeed immediately against the dying VM, running all
-		// configure steps on the wrong machine.
-		vm.WaitForVMDead(vm.SlotIP(sess.Slot))
-	}
-	m.snap.DeleteSnapshot(id) //nolint:errcheck
-	m.freeSlot(sess.Slot)
+		m.snap.DeleteSnapshot(id) //nolint:errcheck
+		m.freeSlot(sess.Slot)
 
-	// Workflow C: clean up the host-side workspace directory now that the VM
-	// (and its virtio-fs mount) is gone.
-	if m.repoCache != nil {
-		m.repoCache.CleanupWorkspace(id)
-	}
+		if m.repoCache != nil {
+			m.repoCache.CleanupWorkspace(id)
+		}
 
-	if sess.sm.State() == session.StateStopping {
 		sess.sm.Transition(session.StateStopped) //nolint:errcheck
-	}
+
+		m.mu.Lock()
+		delete(m.sessions, id)
+		m.mu.Unlock()
+		if m.store != nil {
+			m.store.Delete(id) //nolint:errcheck
+		}
+		log.Printf("[session %s] stopped and removed", id[:8])
+	}()
+
 	return nil
 }
 
