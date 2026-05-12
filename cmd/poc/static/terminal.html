@@ -259,6 +259,14 @@
   // Ctrl+Shift+C / Cmd+C: explicit copy shortcut.
   term.attachCustomKeyEventHandler(e => {
     if (e.type !== 'keydown') return true;
+
+    // Shift+Enter: send \n so Claude Code inserts a newline instead of
+    // submitting. xterm.js sends \r for both Enter and Shift+Enter by default.
+    if (e.code === 'Enter' && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      sendText('\n');
+      return false;
+    }
+
     if ((e.ctrlKey && e.shiftKey && e.code === 'KeyC') ||
         (e.metaKey && e.code === 'KeyC' && term.getSelection().length > 0)) {
       copyText(term.getSelection());
