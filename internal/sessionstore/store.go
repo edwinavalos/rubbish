@@ -1,32 +1,13 @@
 package sessionstore
 
 import (
-	"database/sql"
+	"encoding/json"
 	"fmt"
+	"os"
+	"sort"
+	"sync"
 	"time"
-
-	_ "modernc.org/sqlite"
 )
-
-const schema = `
-CREATE TABLE IF NOT EXISTS sessions (
-    id         TEXT PRIMARY KEY,
-    slot       INTEGER NOT NULL,
-    status     TEXT NOT NULL,
-    repo_url   TEXT NOT NULL DEFAULT '',
-    branch     TEXT NOT NULL DEFAULT '',
-    error_msg  TEXT NOT NULL DEFAULT '',
-    dev_mode   INTEGER NOT NULL DEFAULT 0,
-    created_at DATETIME NOT NULL,
-    updated_at DATETIME NOT NULL
-);
-CREATE TABLE IF NOT EXISTS favorites (
-    id         TEXT PRIMARY KEY,
-    name       TEXT NOT NULL DEFAULT '',
-    repo_url   TEXT NOT NULL DEFAULT '',
-    branch     TEXT NOT NULL DEFAULT '',
-    created_at DATETIME NOT NULL
-);`
 
 // Row is the persisted representation of a session.
 type Row struct {
@@ -41,60 +22,6 @@ type Row struct {
 	UpdatedAt time.Time
 }
 
-// Store wraps a SQLite database for session persistence.
-type Store struct {
-	db *sql.DB
-}
-
-// Open opens (or creates) the SQLite database at path and applies the schema.
-func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		return nil, fmt.Errorf("open sqlite: %w", err)
-	}
-	db.SetMaxOpenConns(1) // SQLite writer serialisation
-	if _, err := db.Exec(schema); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("init schema: %w", err)
-	}
-	// Migrate existing databases that predate the dev_mode column.
-	_, _ = db.Exec(`ALTER TABLE sessions ADD COLUMN dev_mode INTEGER NOT NULL DEFAULT 0`)
-	return &Store{db: db}, nil
-}
-
-// Close releases the database handle.
-func (s *Store) Close() error { return s.db.Close() }
-
-// Upsert inserts or updates a session row.
-func (s *Store) Upsert(r Row) error {
-	devMode := 0
-	if r.DevMode {
-		devMode = 1
-	}
-	_, err := s.db.Exec(`
-		INSERT INTO sessions (id, slot, status, repo_url, branch, error_msg, dev_mode, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET
-			slot       = excluded.slot,
-			status     = excluded.status,
-			repo_url   = excluded.repo_url,
-			branch     = excluded.branch,
-			error_msg  = excluded.error_msg,
-			dev_mode   = excluded.dev_mode,
-			updated_at = excluded.updated_at`,
-		r.ID, r.Slot, r.Status, r.RepoURL, r.Branch, r.ErrorMsg, devMode,
-		r.CreatedAt.UTC().Format(time.RFC3339Nano),
-		r.UpdatedAt.UTC().Format(time.RFC3339Nano),
-	)
-	return err
-}
-
-// Delete removes a session row. No-ops if the row does not exist.
-func (s *Store) Delete(id string) error {
-	_, err := s.db.Exec(`DELETE FROM sessions WHERE id = ?`, id)
-	return err
-}
-
 // Favorite is a saved launch template (repo + branch + display name).
 type Favorite struct {
 	ID        string    `json:"id"`
@@ -104,107 +31,123 @@ type Favorite struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// UpsertFavorite inserts or replaces a favorite row.
-func (s *Store) UpsertFavorite(f Favorite) error {
-	_, err := s.db.Exec(`
-		INSERT INTO favorites (id, name, repo_url, branch, created_at)
-		VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET
-			name       = excluded.name,
-			repo_url   = excluded.repo_url,
-			branch     = excluded.branch`,
-		f.ID, f.Name, f.RepoURL, f.Branch,
-		f.CreatedAt.UTC().Format(time.RFC3339Nano),
-	)
-	return err
+type storeData struct {
+	Sessions  map[string]Row      `json:"sessions"`
+	Favorites map[string]Favorite `json:"favorites"`
 }
 
-// DeleteFavorite removes a favorite row. No-ops if the row does not exist.
-func (s *Store) DeleteFavorite(id string) error {
-	_, err := s.db.Exec(`DELETE FROM favorites WHERE id = ?`, id)
-	return err
+// Store persists sessions and favorites as a JSON file protected by a mutex.
+type Store struct {
+	mu   sync.RWMutex
+	path string
+	data storeData
 }
 
-// ListFavorites returns all favorites ordered by created_at ascending.
-func (s *Store) ListFavorites() ([]Favorite, error) {
-	rows, err := s.db.Query(`
-		SELECT id, name, repo_url, branch, created_at
-		FROM favorites ORDER BY created_at`)
+// Open loads (or creates) the store at path. If the file exists but is not
+// valid JSON (e.g. a leftover SQLite file) it starts empty without error.
+func Open(path string) (*Store, error) {
+	s := &Store{
+		path: path,
+		data: storeData{
+			Sessions:  make(map[string]Row),
+			Favorites: make(map[string]Favorite),
+		},
+	}
+	b, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read store: %w", err)
+	}
+	if len(b) > 0 {
+		if jsonErr := json.Unmarshal(b, &s.data); jsonErr != nil {
+			// Non-JSON file (e.g. old SQLite DB) — start fresh.
+			s.data.Sessions = make(map[string]Row)
+			s.data.Favorites = make(map[string]Favorite)
+		}
+		if s.data.Sessions == nil {
+			s.data.Sessions = make(map[string]Row)
+		}
+		if s.data.Favorites == nil {
+			s.data.Favorites = make(map[string]Favorite)
+		}
+	}
+	return s, nil
+}
+
+// Close is a no-op; kept for API compatibility.
+func (s *Store) Close() error { return nil }
+
+func (s *Store) save() error {
+	b, err := json.Marshal(s.data)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("marshal store: %w", err)
 	}
-	defer rows.Close()
+	return os.WriteFile(s.path, b, 0600)
+}
 
-	var out []Favorite
-	for rows.Next() {
-		var f Favorite
-		var createdAt string
-		if err := rows.Scan(&f.ID, &f.Name, &f.RepoURL, &f.Branch, &createdAt); err != nil {
-			return nil, err
-		}
-		var parseErr error
-		if f.CreatedAt, parseErr = time.Parse(time.RFC3339Nano, createdAt); parseErr != nil {
-			return nil, fmt.Errorf("parse created_at for favorite %s: %w", f.ID, parseErr)
-		}
-		out = append(out, f)
-	}
-	return out, rows.Err()
+// Upsert inserts or updates a session row.
+func (s *Store) Upsert(r Row) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.Sessions[r.ID] = r
+	return s.save()
+}
+
+// Delete removes a session row. No-ops if the row does not exist.
+func (s *Store) Delete(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.data.Sessions, id)
+	return s.save()
 }
 
 // Get returns a single session row by ID. Returns false if not found.
 func (s *Store) Get(id string) (Row, bool, error) {
-	var r Row
-	var devMode int
-	var createdAt, updatedAt string
-	err := s.db.QueryRow(`
-		SELECT id, slot, status, repo_url, branch, error_msg, dev_mode, created_at, updated_at
-		FROM sessions WHERE id = ?`, id).Scan(
-		&r.ID, &r.Slot, &r.Status, &r.RepoURL, &r.Branch, &r.ErrorMsg, &devMode, &createdAt, &updatedAt,
-	)
-	if err == sql.ErrNoRows {
-		return Row{}, false, nil
-	}
-	if err != nil {
-		return Row{}, false, err
-	}
-	r.DevMode = devMode != 0
-	var parseErr error
-	if r.CreatedAt, parseErr = time.Parse(time.RFC3339Nano, createdAt); parseErr != nil {
-		return Row{}, false, fmt.Errorf("parse created_at for session %s: %w", r.ID, parseErr)
-	}
-	if r.UpdatedAt, parseErr = time.Parse(time.RFC3339Nano, updatedAt); parseErr != nil {
-		return Row{}, false, fmt.Errorf("parse updated_at for session %s: %w", r.ID, parseErr)
-	}
-	return r, true, nil
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	r, ok := s.data.Sessions[id]
+	return r, ok, nil
 }
 
 // List returns all session rows ordered by created_at ascending.
 func (s *Store) List() ([]Row, error) {
-	rows, err := s.db.Query(`
-		SELECT id, slot, status, repo_url, branch, error_msg, dev_mode, created_at, updated_at
-		FROM sessions ORDER BY created_at`)
-	if err != nil {
-		return nil, err
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows := make([]Row, 0, len(s.data.Sessions))
+	for _, r := range s.data.Sessions {
+		rows = append(rows, r)
 	}
-	defer rows.Close()
+	sort.Slice(rows, func(i, j int) bool {
+		return rows[i].CreatedAt.Before(rows[j].CreatedAt)
+	})
+	return rows, nil
+}
 
-	var out []Row
-	for rows.Next() {
-		var r Row
-		var devMode int
-		var createdAt, updatedAt string
-		if err := rows.Scan(&r.ID, &r.Slot, &r.Status, &r.RepoURL, &r.Branch, &r.ErrorMsg, &devMode, &createdAt, &updatedAt); err != nil {
-			return nil, err
-		}
-		r.DevMode = devMode != 0
-		var parseErr error
-		if r.CreatedAt, parseErr = time.Parse(time.RFC3339Nano, createdAt); parseErr != nil {
-			return nil, fmt.Errorf("parse created_at for session %s: %w", r.ID, parseErr)
-		}
-		if r.UpdatedAt, parseErr = time.Parse(time.RFC3339Nano, updatedAt); parseErr != nil {
-			return nil, fmt.Errorf("parse updated_at for session %s: %w", r.ID, parseErr)
-		}
-		out = append(out, r)
+// UpsertFavorite inserts or replaces a favorite row.
+func (s *Store) UpsertFavorite(f Favorite) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.Favorites[f.ID] = f
+	return s.save()
+}
+
+// DeleteFavorite removes a favorite row. No-ops if the row does not exist.
+func (s *Store) DeleteFavorite(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.data.Favorites, id)
+	return s.save()
+}
+
+// ListFavorites returns all favorites ordered by created_at ascending.
+func (s *Store) ListFavorites() ([]Favorite, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	favs := make([]Favorite, 0, len(s.data.Favorites))
+	for _, f := range s.data.Favorites {
+		favs = append(favs, f)
 	}
-	return out, rows.Err()
+	sort.Slice(favs, func(i, j int) bool {
+		return favs[i].CreatedAt.Before(favs[j].CreatedAt)
+	})
+	return favs, nil
 }
