@@ -454,6 +454,14 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		t("mount_workspace", stepT)
 	}
 
+	// Mount the shared Go build cache so incremental builds stay under the
+	// VM's RAM limit.  Non-fatal: a miss here degrades to cold-cache builds.
+	stepT = time.Now()
+	if err := mountGoCache(bridge, m.devHostIP); err != nil {
+		log.Printf("[session %s] warning: mount go-cache: %v", sid, err)
+	}
+	t("mount_go_cache", stepT)
+
 	// Set a unique per-session hostname so the prompt shows the session ID.
 	// claude has NOPASSWD sudo baked into the rootfs, so no privilege escalation needed.
 	vmHostname := "rubbish-" + sid
@@ -466,7 +474,15 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 	}
 	t("configure_hostname", stepT)
 
-	// Inject profile credentials into the VM environment.
+	// Inject profile credentials and Go toolchain config into the VM environment.
+	// GOTOOLCHAIN=local prevents Go from attempting to download a newer toolchain
+	// when go.mod specifies a version newer than what's installed in the rootfs.
+	if err := bridge.RunSetup([]string{
+		"printf 'export GOTOOLCHAIN=local\\nexport PATH=/usr/local/go/bin:$PATH\\n' >> ~/.profile",
+	}); err != nil {
+		log.Printf("[session %s] warning: inject go env: %v", sid, err)
+	}
+
 	if m.prof != nil {
 		if p, err := m.prof.Load(); err == nil && p.ClaudeOAuthToken != "" {
 			cmds := []string{
@@ -751,6 +767,20 @@ const devSeedDir = "/opt/rubbish/dev-seed"
 
 // nfsBase is the host path exported via NFS for shared Claude memory.
 const nfsBase = "/opt/rubbish/claude-shared"
+
+// mountGoCache NFS-mounts the shared Go build cache into the VM at the
+// default GOCACHE path.  Multiple VMs share the same cache safely because
+// Go's cache uses content-addressed files written via atomic rename.
+func mountGoCache(bridge setupRunner, hostIP string) error {
+	const (
+		hostPath  = "/opt/rubbish/go-cache"
+		guestPath = "/home/claude/.cache/go-build"
+	)
+	return bridge.RunSetup([]string{
+		"mkdir -p " + guestPath,
+		fmt.Sprintf("sudo mount -t nfs %s:%s %s -o vers=4,noatime,soft", hostIP, hostPath, guestPath),
+	})
+}
 
 // mountWorkspace NFS-mounts the session's host workspace directory into the VM
 // at /home/claude/workspace/<repoName>.  The host must export
