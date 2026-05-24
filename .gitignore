@@ -1,10 +1,15 @@
 # Compiled binaries
 /rubbish-poc
+/rubbish-poc-*
 /poc
 /rubbishd
+/rubbish-terminal-*
 
 # Generated protobuf (committed separately if desired)
 # gen/
 
 # OS
 .DS_Store
+
+# Claude Code agent worktrees (ephemeral, not source)
+/.claude/
