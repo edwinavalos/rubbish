@@ -168,6 +168,7 @@ type SessionManager struct {
 	store      *sessionstore.Store
 	devHostIP  string // host IP used for NFS mounts in dev-mode sessions
 	repoCache  *gitutil.RepoCache
+	serverCtx  context.Context // lifetime context for background goroutines (boot, etc.)
 }
 
 func NewSessionManager(snapMgr *fc.SnapshotManager, signer ssh.Signer, credPath string, prof *profile.Store, store *sessionstore.Store, maxSlots int, devHostIP string) *SessionManager {
@@ -567,7 +568,9 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		_ = claudeCtx // context reserved for future SSH timeout integration
 
 		var buf strings.Builder
-		cmd := "claude --dangerously-skip-permissions -p " + shellQuote(sess.Prompt)
+		// Run via bash login shell so ~/.profile is sourced (CLAUDE_CODE_OAUTH_TOKEN etc.)
+		innerCmd := "claude --dangerously-skip-permissions -p " + shellQuote(sess.Prompt)
+		cmd := "bash -lc " + shellQuote(innerCmd)
 		if err := sess.bridge.RunSetupCapture([]string{cmd}, &buf); err != nil {
 			log.Printf("[session %s] claude -p error: %v", sid, err)
 		}
@@ -748,9 +751,14 @@ func (m *SessionManager) StopAll() {
 // ---- workflow.SessionStarter adapter methods --------------------------------
 
 // CreateSession implements workflow.SessionStarter. It creates a non-interactive
-// session and returns its ID.
+// session and returns its ID. Uses the server context so the boot goroutine
+// isn't canceled when the calling HTTP request finishes.
 func (m *SessionManager) CreateSession(ctx context.Context, role, prompt, repoURL, branch string) (string, error) {
-	sess, err := m.Create(ctx, repoURL, branch, "", false, role, prompt)
+	bootCtx := m.serverCtx
+	if bootCtx == nil {
+		bootCtx = context.Background()
+	}
+	sess, err := m.Create(bootCtx, repoURL, branch, "", false, role, prompt)
 	if err != nil {
 		return "", err
 	}
@@ -1430,7 +1438,9 @@ func main() {
 		log.Fatalf("open workflow store: %v", err)
 	}
 
-	engine := workflow.NewEngine(wfStore, mgr, 3)
+	mgr.serverCtx = ctx
+
+	engine := workflow.NewEngine(ctx, wfStore, mgr, 3)
 	engine.RecoverInProgress(ctx) //nolint:errcheck
 
 	mux := http.NewServeMux()

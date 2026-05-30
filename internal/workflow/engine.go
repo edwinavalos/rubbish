@@ -27,19 +27,26 @@ type SessionStarter interface {
 type Engine struct {
 	store      *Store
 	sessions   SessionStarter
-	maxWorkers int // limits concurrent implement-stage sessions; default 3
+	maxWorkers int     // limits concurrent implement-stage sessions; default 3
+	serverCtx  context.Context // lifetime context for background goroutines
 }
 
 // NewEngine constructs an Engine. maxWorkers controls the implement fan-out
-// concurrency; pass 0 or negative to use the default of 3.
-func NewEngine(store *Store, sessions SessionStarter, maxWorkers int) *Engine {
+// concurrency; pass 0 or negative to use the default of 3. serverCtx should
+// be the server's lifetime context so workflow goroutines aren't canceled when
+// the HTTP request that triggered Submit finishes.
+func NewEngine(serverCtx context.Context, store *Store, sessions SessionStarter, maxWorkers int) *Engine {
 	if maxWorkers <= 0 {
 		maxWorkers = 3
+	}
+	if serverCtx == nil {
+		serverCtx = context.Background()
 	}
 	return &Engine{
 		store:      store,
 		sessions:   sessions,
 		maxWorkers: maxWorkers,
+		serverCtx:  serverCtx,
 	}
 }
 
@@ -83,7 +90,7 @@ func (e *Engine) Submit(ctx context.Context, input, repoURL, branch string) (str
 		return "", fmt.Errorf("persist running workflow: %w", err)
 	}
 
-	go e.run(ctx, id)
+	go e.run(e.serverCtx, id)
 	return id, nil
 }
 
@@ -389,7 +396,7 @@ func (e *Engine) RecoverInProgress(ctx context.Context) error {
 	recovered := 0
 	for _, wf := range wfs {
 		if wf.Status == StatusQueued || wf.Status == StatusRunning {
-			go e.run(ctx, wf.ID)
+			go e.run(e.serverCtx, wf.ID)
 			recovered++
 		}
 	}
