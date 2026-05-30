@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 )
@@ -283,10 +284,26 @@ func (e *Engine) runStage(ctx context.Context, wfID, stageID string, kind StageK
 		return fmt.Errorf("persist stage %s running: %w", stageID, err)
 	}
 
-	// --- create session ---
-	sessionID, err := e.sessions.CreateSession(ctx, string(kind), prompt, wf.RepoURL, wf.Branch)
-	if err != nil {
-		return e.markStageFailed(wfID, stageID, fmt.Errorf("create session: %w", err))
+	// --- create session (retry until a slot is free) ---
+	// Non-interactive stages spin down their VM when done, freeing slots for
+	// the next stage or concurrent workers. Retry here so workers queue
+	// naturally rather than failing immediately when all slots are busy.
+	var sessionID string
+	for {
+		var cerr error
+		sessionID, cerr = e.sessions.CreateSession(ctx, string(kind), prompt, wf.RepoURL, wf.Branch)
+		if cerr == nil {
+			break
+		}
+		if !strings.Contains(cerr.Error(), "no slots available") {
+			return e.markStageFailed(wfID, stageID, fmt.Errorf("create session: %w", cerr))
+		}
+		log.Printf("[workflow %s] stage %s waiting for a free slot...", wfID, stageID)
+		select {
+		case <-ctx.Done():
+			return e.markStageFailed(wfID, stageID, ctx.Err())
+		case <-time.After(5 * time.Second):
+		}
 	}
 
 	// Persist sessionID immediately.
