@@ -96,7 +96,6 @@ func (b *Bridge) relay(ws *websocket.Conn, startCmd string, connStart time.Time)
 		ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("\r\nSSH session failed: %v\r\n", err))) //nolint:errcheck
 		return
 	}
-	defer session.Close()
 
 	modes := ssh.TerminalModes{
 		ssh.ECHO:          1,
@@ -166,6 +165,8 @@ func (b *Bridge) relay(ws *websocket.Conn, startCmd string, connStart time.Time)
 		}
 	}
 
+	// Close the SSH session to unblock the stdout goroutine, then wait for it.
+	session.Close() //nolint:errcheck
 	<-done
 }
 

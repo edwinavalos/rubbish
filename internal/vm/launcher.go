@@ -3,9 +3,11 @@ package vm
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"time"
 
 	firecracker "github.com/firecracker-microvm/firecracker-go-sdk"
@@ -97,7 +99,6 @@ func Launch(ctx context.Context, slot int, rootfsPath string, memMiB int64) (*VM
 	cmd := firecracker.VMCommandBuilder{}.
 		WithBin(FCBinary).
 		WithSocketPath(sock).
-		WithStdin(os.Stdin).
 		WithStdout(os.Stdout).
 		WithStderr(os.Stderr).
 		Build(machineCtx)
@@ -114,7 +115,7 @@ func Launch(ctx context.Context, slot int, rootfsPath string, memMiB int64) (*VM
 		return nil, fmt.Errorf("start machine: %w", err)
 	}
 
-	fmt.Printf("[vm slot=%d] boot issued in %s (rootfs=%s)\n", slot, time.Since(t).Round(time.Millisecond), rootfsPath)
+	log.Printf("[vm slot=%d] boot issued in %s (rootfs=%s)", slot, time.Since(t).Round(time.Millisecond), rootfsPath)
 
 	return &VM{
 		machine:    m,
@@ -168,13 +169,13 @@ func InjectNetworkConfig(snapshotDevice, ip, gateway string) error {
 }
 
 func (v *VM) WaitForSSH(ctx context.Context) error {
-	addr := fmt.Sprintf("%s:%d", SlotIP(v.Slot), VMSSHPort)
+	addr := net.JoinHostPort(SlotIP(v.Slot), strconv.Itoa(VMSSHPort))
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		conn, err := tryDial(addr)
 		if err == nil {
 			conn.Close()
-			fmt.Printf("[vm slot=%d] ssh ready in %s\n", v.Slot, time.Since(v.LaunchedAt).Round(time.Millisecond))
+			log.Printf("[vm slot=%d] ssh ready in %s", v.Slot, time.Since(v.LaunchedAt).Round(time.Millisecond))
 			return nil
 		}
 		select {
@@ -190,7 +191,7 @@ func (v *VM) WaitForSSH(ctx context.Context) error {
 // until 5 seconds elapse. Called after Stop() to ensure the slot is not
 // reused while the dying VM's SSH is still answering.
 func WaitForVMDead(ip string) {
-	addr := fmt.Sprintf("%s:%d", ip, VMSSHPort)
+	addr := net.JoinHostPort(ip, strconv.Itoa(VMSSHPort))
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
@@ -200,7 +201,7 @@ func WaitForVMDead(ip string) {
 		conn.Close()
 		time.Sleep(100 * time.Millisecond)
 	}
-	fmt.Printf("[vm] warning: %s still reachable 5s after stop — slot reuse may cause session collision\n", addr)
+	log.Printf("[vm] warning: %s still reachable 5s after stop — slot reuse may cause session collision", addr)
 }
 
 func (v *VM) Stop(ctx context.Context) error {

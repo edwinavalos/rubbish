@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -58,6 +59,7 @@ type bridgeFactory interface {
 
 type setupRunner interface {
 	RunSetup(cmds []string) error
+	RunSetupCapture(cmds []string, w io.Writer) error
 }
 
 // ---- Real adapters ----------------------------------------------------------
@@ -92,6 +94,9 @@ type Session struct {
 	DevMode   bool      `json:"dev_mode,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	Error     string    `json:"error,omitempty"`
+	Role      string    `json:"role,omitempty"`
+	Prompt    string    `json:"prompt,omitempty"`
+	Result    string    `json:"result,omitempty"`
 
 	// workspacePath is the host-side directory created by the bare-repo local
 	// clone (Workflow C).  It is set during boot() and cleaned up by Stop().
@@ -118,6 +123,9 @@ func (s *Session) MarshalJSON() ([]byte, error) {
 		DevMode   bool          `json:"dev_mode,omitempty"`
 		CreatedAt time.Time     `json:"created_at"`
 		Error     string        `json:"error,omitempty"`
+		Role      string        `json:"role,omitempty"`
+		Prompt    string        `json:"prompt,omitempty"`
+		Result    string        `json:"result,omitempty"`
 	}
 	return json.Marshal(wire{
 		ID:        s.ID,
@@ -128,6 +136,9 @@ func (s *Session) MarshalJSON() ([]byte, error) {
 		DevMode:   s.DevMode,
 		CreatedAt: s.CreatedAt,
 		Error:     s.Error,
+		Role:      s.Role,
+		Prompt:    s.Prompt,
+		Result:    s.Result,
 	})
 }
 
@@ -196,6 +207,9 @@ func (m *SessionManager) persistSession(sess *Session) {
 		DevMode:   sess.DevMode,
 		CreatedAt: sess.CreatedAt,
 		UpdatedAt: time.Now(),
+		Role:      sess.Role,
+		Prompt:    sess.Prompt,
+		Result:    sess.Result,
 	}
 	m.mu.RUnlock()
 	if err := m.store.Upsert(row); err != nil {
@@ -237,7 +251,10 @@ func (m *SessionManager) freeSlot(slot int) {
 
 // Create allocates a slot and starts a VM in the background.
 // Returns immediately with status "provisioning".
-func (m *SessionManager) Create(parentCtx context.Context, repoURL, branch, githubToken string, devMode bool) (*Session, error) {
+func (m *SessionManager) Create(parentCtx context.Context, repoURL, branch, githubToken string, devMode bool, role, prompt string) (*Session, error) {
+	if role == "" {
+		role = "interactive"
+	}
 	m.mu.Lock()
 	slot, ok := m.allocSlot()
 	if !ok {
@@ -256,6 +273,8 @@ func (m *SessionManager) Create(parentCtx context.Context, repoURL, branch, gith
 		DevMode:   devMode,
 		CreatedAt: time.Now(),
 		cancel:    cancel,
+		Role:      role,
+		Prompt:    prompt,
 	}
 	sess.sm = m.newSM(sess, session.StateProvisioning)
 	m.sessions[id] = sess
@@ -302,11 +321,11 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 	// starts.  The VM will see it via a virtio-fs mount (wired in launcher.go).
 	// This runs entirely on the host and is fast (hardlinks, no network for the
 	// clone step).
+	repoName := gitutil.RepoName(sess.RepoURL)
+	if repoName == "" && sess.RepoURL != "" {
+		repoName = "repo"
+	}
 	if sess.RepoURL != "" && m.repoCache != nil {
-		repoName := gitutil.RepoName(sess.RepoURL)
-		if repoName == "" {
-			repoName = "repo"
-		}
 		stepT := time.Now()
 		barePath, err := m.repoCache.EnsureBareRepo(sess.RepoURL, repoName, token)
 		stepT = t("repo_fetch", stepT)
@@ -485,11 +504,26 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 
 	if m.prof != nil {
 		if p, err := m.prof.Load(); err == nil && p.ClaudeOAuthToken != "" {
+			// Build a node one-liner that merges our settings into ~/.claude.json.
+			// Using node avoids a JSON dependency in the rootfs and lets us read
+			// the actual installed Claude version so release-notes prompts are skipped.
+			wsPath := ""
+			if repoName != "" {
+				wsPath = "/home/claude/workspace/" + repoName
+			}
+			nodeScript := fmt.Sprintf(
+				`const fs=require('fs'),h=require('os').homedir(),p=h+'/.claude.json';`+
+					`let c={};try{c=JSON.parse(fs.readFileSync(p,'utf8'))}catch(_){}c.hasCompletedOnboarding=true;`+
+					`try{const v=require('child_process').execSync('claude --version 2>/dev/null').toString().split(' ')[0].trim();`+
+					`c.lastOnboardingVersion=v;c.lastReleaseNotesSeen=v}catch(_){}if(!c.projects)c.projects={};`+
+					`const wp=%q;if(wp){if(!c.projects[wp])c.projects[wp]={};c.projects[wp].hasTrustDialogAccepted=true;}`+
+					`fs.writeFileSync(p,JSON.stringify(c),{mode:0o600})`,
+				wsPath,
+			)
 			cmds := []string{
 				fmt.Sprintf("printf 'export CLAUDE_CODE_OAUTH_TOKEN=%s\\n' >> ~/.profile", p.ClaudeOAuthToken),
 				"chmod 600 ~/.profile",
-				`printf '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.29"}\n' > ~/.claude.json`,
-				"chmod 600 ~/.claude.json",
+				"node -e " + shellQuote(nodeScript),
 			}
 			stepT = time.Now()
 			if err := bridge.RunSetup(cmds); err != nil {
@@ -514,6 +548,59 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		return
 	}
 	log.Printf("[session %s] ready (slot=%d ip=%s) total=%s", sid, sess.Slot, vm.SlotIP(sess.Slot), time.Since(bootStart).Round(time.Millisecond))
+
+	// 8. Non-interactive path: run claude -p, capture output, then stop.
+	if sess.Role != "interactive" {
+		log.Printf("[session %s] non-interactive mode (role=%s), running claude -p", sid, sess.Role)
+		claudeCtx, claudeCancel := context.WithTimeout(ctx, 30*time.Minute)
+		defer claudeCancel()
+		_ = claudeCtx // context reserved for future SSH timeout integration
+
+		var buf strings.Builder
+		cmd := "claude --dangerously-skip-permissions -p " + shellQuote(sess.Prompt)
+		if err := sess.bridge.RunSetupCapture([]string{cmd}, &buf); err != nil {
+			log.Printf("[session %s] claude -p error: %v", sid, err)
+		}
+		result := buf.String()
+
+		m.mu.Lock()
+		sess.Result = result
+		m.mu.Unlock()
+
+		log.Printf("[session %s] claude -p finished (%d bytes), stopping", sid, len(result))
+
+		// Transition to Stopping and run cleanup inline (we're already in a goroutine).
+		if err := sess.sm.Transition(session.StateStopping); err != nil {
+			log.Printf("[session %s] transition to stopping error: %v", sid, err)
+		}
+		// Persist result before stopping.
+		m.persistSession(sess)
+
+		sess.cancel()
+		if sess.v != nil {
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), 8*time.Second)
+			if err := sess.v.Stop(stopCtx); err != nil {
+				log.Printf("[session %s] stop vm: %v", sid, err)
+			}
+			stopCancel()
+			vm.WaitForVMDead(vm.SlotIP(sess.Slot))
+		}
+		m.snap.DeleteSnapshot(sess.ID) //nolint:errcheck
+		m.freeSlot(sess.Slot)
+
+		sess.sm.Transition(session.StateStopped) //nolint:errcheck
+		// Persist final stopped state with result before removing from map.
+		m.persistSession(sess)
+
+		m.mu.Lock()
+		delete(m.sessions, sess.ID)
+		m.mu.Unlock()
+
+		if m.repoCache != nil {
+			m.repoCache.CleanupWorkspace(sess.ID)
+		}
+		log.Printf("[session %s] non-interactive session stopped and removed", sid)
+	}
 }
 
 func (m *SessionManager) Get(id string) (*Session, bool) {
@@ -726,13 +813,12 @@ func (m *SessionManager) loadFromDB(parentCtx context.Context) {
 
 		default: // stopped, failed — terminal states, load as-is
 			cancel()
-			ctx, cancel = context.WithCancel(parentCtx)
-			sess.cancel = cancel
+			sess.cancel = func() {}
 			sess.sm = m.newSM(sess, status)
 			log.Printf("[startup] loaded terminal session %s (%s)", row.ID[:8], status)
 		}
 
-		_ = ctx // context held by sess.cancel; suppresses unused-variable warning
+		_ = ctx // context held by sess.cancel for live sessions; suppresses unused-variable warning
 
 		m.mu.Lock()
 		m.sessions[row.ID] = sess
@@ -894,6 +980,12 @@ func saveToken(path, token string) error {
 
 // ---- HTTP handlers ----------------------------------------------------------
 
+// shellQuote wraps s in single quotes safe for POSIX shell, escaping any
+// embedded single quotes via the '"'"' idiom.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -973,12 +1065,14 @@ func registerHandlers(mux *http.ServeMux, mgr *SessionManager, rootCtx context.C
 				Branch      string `json:"branch"`
 				GithubToken string `json:"github_token"`
 				DevMode     bool   `json:"dev_mode"`
+				Role        string `json:"role"`
+				Prompt      string `json:"prompt"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				http.Error(w, "bad request", http.StatusBadRequest)
 				return
 			}
-			sess, err := mgr.Create(rootCtx, body.RepoURL, body.Branch, body.GithubToken, body.DevMode)
+			sess, err := mgr.Create(rootCtx, body.RepoURL, body.Branch, body.GithubToken, body.DevMode, body.Role, body.Prompt)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusServiceUnavailable)
 				return
@@ -992,6 +1086,25 @@ func registerHandlers(mux *http.ServeMux, mgr *SessionManager, rootCtx context.C
 
 	mux.HandleFunc("/api/sessions/", func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
+
+		if strings.HasSuffix(path, "/result") {
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			id := strings.TrimSuffix(path, "/result")
+			sess, ok := mgr.Get(id)
+			if !ok {
+				http.Error(w, "session not found", http.StatusNotFound)
+				return
+			}
+			if sess.SessionStatus() != session.StateStopped {
+				http.Error(w, "result not yet available", http.StatusConflict)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]string{"result": sess.Result})
+			return
+		}
 
 		if strings.HasSuffix(path, "/start") {
 			if r.Method != http.MethodPost {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -20,6 +21,11 @@ type Row struct {
 	DevMode   bool
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	// Role is the session type: "interactive" | "research" | "plan" | "implement".
+	// Defaults to "interactive" when empty.
+	Role   string
+	Prompt string // claude -p prompt for non-interactive sessions
+	Result string // captured stdout, set when session reaches Stopped
 }
 
 // Favorite is a saved launch template (repo + branch + display name).
@@ -81,7 +87,26 @@ func (s *Store) save() error {
 	if err != nil {
 		return fmt.Errorf("marshal store: %w", err)
 	}
-	return os.WriteFile(s.path, b, 0600)
+	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".store-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp store: %w", err)
+	}
+	tmpName := tmp.Name()
+	_, writeErr := tmp.Write(b)
+	closeErr := tmp.Close()
+	if writeErr != nil {
+		os.Remove(tmpName) //nolint:errcheck
+		return fmt.Errorf("write temp store: %w", writeErr)
+	}
+	if closeErr != nil {
+		os.Remove(tmpName) //nolint:errcheck
+		return fmt.Errorf("close temp store: %w", closeErr)
+	}
+	if err := os.Rename(tmpName, s.path); err != nil {
+		os.Remove(tmpName) //nolint:errcheck
+		return fmt.Errorf("rename temp store: %w", err)
+	}
+	return nil
 }
 
 // Upsert inserts or updates a session row.
@@ -100,18 +125,40 @@ func (s *Store) Delete(id string) error {
 	return s.save()
 }
 
+// reload re-reads the file into s.data. Caller must hold s.mu for writing.
+func (s *Store) reload() {
+	b, err := os.ReadFile(s.path)
+	if err != nil || len(b) == 0 {
+		return
+	}
+	var d storeData
+	if json.Unmarshal(b, &d) != nil {
+		return
+	}
+	if d.Sessions != nil {
+		s.data.Sessions = d.Sessions
+	}
+	if d.Favorites != nil {
+		s.data.Favorites = d.Favorites
+	}
+}
+
 // Get returns a single session row by ID. Returns false if not found.
+// It re-reads the backing file so that a second process writing the same file
+// (e.g. rubbish-poc writing, rubbish-terminal reading) always sees current state.
 func (s *Store) Get(id string) (Row, bool, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reload()
 	r, ok := s.data.Sessions[id]
 	return r, ok, nil
 }
 
 // List returns all session rows ordered by created_at ascending.
 func (s *Store) List() ([]Row, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reload()
 	rows := make([]Row, 0, len(s.data.Sessions))
 	for _, r := range s.data.Sessions {
 		rows = append(rows, r)
@@ -140,8 +187,9 @@ func (s *Store) DeleteFavorite(id string) error {
 
 // ListFavorites returns all favorites ordered by created_at ascending.
 func (s *Store) ListFavorites() ([]Favorite, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reload()
 	favs := make([]Favorite, 0, len(s.data.Favorites))
 	for _, f := range s.data.Favorites {
 		favs = append(favs, f)

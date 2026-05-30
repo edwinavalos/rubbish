@@ -78,7 +78,7 @@ func TestBoot_ClonesHTTPSRepo(t *testing.T) {
 	store := storeWithGHToken(t, "ghp_testtoken")
 	mgr := newTestManagerWithProfile(&fakeSnapshotter{}, &fakeLauncher{handle: &fakeVMHandle{}}, &fakeBridgeFactory{runner}, store)
 
-	sess, err := mgr.Create(context.Background(), "https://github.com/example/myrepo", "", "", false)
+	sess, err := mgr.Create(context.Background(), "https://github.com/example/myrepo", "", "", false, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestBoot_NormalizesSSHURL(t *testing.T) {
 	store := storeWithGHToken(t, "ghp_testtoken")
 	mgr := newTestManagerWithProfile(&fakeSnapshotter{}, &fakeLauncher{handle: &fakeVMHandle{}}, &fakeBridgeFactory{runner}, store)
 
-	sess, err := mgr.Create(context.Background(), "git@github.com:example/myrepo.git", "", "", false)
+	sess, err := mgr.Create(context.Background(), "git@github.com:example/myrepo.git", "", "", false, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestBoot_CredentialsSetBeforeClone(t *testing.T) {
 	store := storeWithGHToken(t, "ghp_testtoken")
 	mgr := newTestManagerWithProfile(&fakeSnapshotter{}, &fakeLauncher{handle: &fakeVMHandle{}}, &fakeBridgeFactory{runner}, store)
 
-	sess, _ := mgr.Create(context.Background(), "https://github.com/example/myrepo", "", "", false)
+	sess, _ := mgr.Create(context.Background(), "https://github.com/example/myrepo", "", "", false, "", "")
 	waitState(t, mgr, sess.ID, session.StateReady, 3*time.Second)
 
 	cmds := runner.allCmds()
@@ -157,7 +157,7 @@ func TestBoot_CloneFailure_SessionStillReady(t *testing.T) {
 	store := storeWithGHToken(t, "ghp_testtoken")
 	mgr := newTestManagerWithProfile(&fakeSnapshotter{}, &fakeLauncher{handle: &fakeVMHandle{}}, &fakeBridgeFactory{runner}, store)
 
-	sess, err := mgr.Create(context.Background(), "https://github.com/example/myrepo", "", "", false)
+	sess, err := mgr.Create(context.Background(), "https://github.com/example/myrepo", "", "", false, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestBoot_NoCloneWithoutRepo(t *testing.T) {
 	runner := &capturingSetupRunner{}
 	mgr := newTestManager(&fakeSnapshotter{}, &fakeLauncher{handle: &fakeVMHandle{}}, &fakeBridgeFactory{runner})
 
-	sess, _ := mgr.Create(context.Background(), "", "", "", false)
+	sess, _ := mgr.Create(context.Background(), "", "", "", false, "", "")
 	waitState(t, mgr, sess.ID, session.StateReady, 3*time.Second)
 
 	for _, cmd := range runner.allCmds() {
@@ -184,7 +184,7 @@ func TestBoot_BranchClone(t *testing.T) {
 	store := storeWithGHToken(t, "ghp_testtoken")
 	mgr := newTestManagerWithProfile(&fakeSnapshotter{}, &fakeLauncher{handle: &fakeVMHandle{}}, &fakeBridgeFactory{runner}, store)
 
-	sess, _ := mgr.Create(context.Background(), "https://github.com/example/myrepo", "feature-branch", "", false)
+	sess, _ := mgr.Create(context.Background(), "https://github.com/example/myrepo", "feature-branch", "", false, "", "")
 	waitState(t, mgr, sess.ID, session.StateReady, 3*time.Second)
 
 	cmds := runner.allCmds()

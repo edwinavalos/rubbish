@@ -172,7 +172,7 @@ func TestLocalClone(t *testing.T) {
 		t.Fatalf("EnsureBareRepo: %v", err)
 	}
 
-	destPath, err := cache.LocalClone(barePath, "session-1", "myrepo", "")
+	destPath, err := cache.LocalClone(barePath, "session-1", "myrepo", "", "")
 	if err != nil {
 		t.Fatalf("LocalClone: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestLocalClone_Branch(t *testing.T) {
 		t.Fatalf("EnsureBareRepo: %v", err)
 	}
 
-	destPath, err := cache.LocalClone(barePath, "session-1", "myrepo", "feature")
+	destPath, err := cache.LocalClone(barePath, "session-1", "myrepo", "feature", "")
 	if err != nil {
 		t.Fatalf("LocalClone -b feature: %v", err)
 	}

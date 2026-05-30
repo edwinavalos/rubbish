@@ -3,6 +3,7 @@ package profile
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -32,6 +33,9 @@ func (s *Store) Load() (Profile, error) {
 	if err != nil {
 		return Profile{}, err
 	}
+	if len(data) == 0 {
+		return Profile{}, nil
+	}
 	var p Profile
 	if err := json.Unmarshal(data, &p); err != nil {
 		return Profile{}, err
@@ -47,7 +51,26 @@ func (s *Store) Save(p Profile) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.path, data, 0600)
+	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".profile-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	_, writeErr := tmp.Write(data)
+	closeErr := tmp.Close()
+	if writeErr != nil {
+		os.Remove(tmpName) //nolint:errcheck
+		return writeErr
+	}
+	if closeErr != nil {
+		os.Remove(tmpName) //nolint:errcheck
+		return closeErr
+	}
+	if err := os.Rename(tmpName, s.path); err != nil {
+		os.Remove(tmpName) //nolint:errcheck
+		return err
+	}
+	return nil
 }
 
 // MaskToken returns the token with all but the last 4 chars replaced with *.

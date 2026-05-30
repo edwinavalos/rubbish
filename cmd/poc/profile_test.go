@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -27,6 +28,10 @@ func (r *capturingSetupRunner) RunSetup(cmds []string) error {
 	r.calls = append(r.calls, append([]string(nil), cmds...))
 	r.mu.Unlock()
 	return nil
+}
+
+func (r *capturingSetupRunner) RunSetupCapture(cmds []string, _ io.Writer) error {
+	return r.RunSetup(cmds)
 }
 
 func (r *capturingSetupRunner) allCmds() []string {
@@ -65,7 +70,7 @@ func TestBoot_InjectsClaudeToken(t *testing.T) {
 		store,
 	)
 
-	sess, err := mgr.Create(context.Background(), "", "", "", false)
+	sess, err := mgr.Create(context.Background(), "", "", "", false, "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -96,7 +101,7 @@ func TestBoot_SkipsInjectionWhenNoToken(t *testing.T) {
 		store,
 	)
 
-	sess, _ := mgr.Create(context.Background(), "", "", "", false)
+	sess, _ := mgr.Create(context.Background(), "", "", "", false, "", "")
 	waitState(t, mgr, sess.ID, session.StateReady, 3*time.Second)
 
 	for _, cmd := range runner.allCmds() {
@@ -204,7 +209,7 @@ func TestBoot_UsesProfileGitHubToken(t *testing.T) {
 		store,
 	)
 
-	sess, err := mgr.Create(context.Background(), "https://github.com/example/repo", "", "", false)
+	sess, err := mgr.Create(context.Background(), "https://github.com/example/repo", "", "", false, "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

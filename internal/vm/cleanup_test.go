@@ -64,7 +64,7 @@ func TestCleanupOrphans_OccupiedSlot(t *testing.T) {
 	// cleanupOrphans will try to kill PID 99999 (doesn't exist — killProcess handles gracefully)
 	// and call teardownTAP (which runs a real shell command that may fail — that's OK).
 	// We just verify lsof was called and the socket is cleaned up.
-	cleanupOrphans(1, fc) //nolint:errcheck
+	cleanupOrphansExcept(1, nil, fc) //nolint:errcheck
 
 	if !fc.called("lsof -t") {
 		t.Error("expected lsof to be called for occupied slot")
@@ -80,7 +80,7 @@ func TestCleanupOrphans_EmptySlot(t *testing.T) {
 	os.Remove(sock)
 
 	fc := &fakeCommander{}
-	cleanupOrphans(1, fc) //nolint:errcheck
+	cleanupOrphansExcept(1, nil, fc) //nolint:errcheck
 
 	for _, c := range fc.calls {
 		if strings.HasPrefix(c, "lsof") {
@@ -96,7 +96,7 @@ func TestCleanupOrphans_NoOrphans(t *testing.T) {
 	}
 
 	fc := &fakeCommander{}
-	err := cleanupOrphans(MaxSlots, fc)
+	err := cleanupOrphansExcept(MaxSlots, nil, fc)
 	if err != nil {
 		t.Errorf("expected nil error with no orphans, got: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestCleanupOrphans_PartialFailure_ContinuesOtherSlots(t *testing.T) {
 	}
 
 	// Even if slot 0 teardown has issues, slot 1 should still be processed.
-	cleanupOrphans(2, fc) //nolint:errcheck
+	cleanupOrphansExcept(2, nil, fc) //nolint:errcheck
 
 	// Both sockets should be removed (or attempted).
 	lsofCalls := 0

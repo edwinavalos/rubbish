@@ -49,10 +49,6 @@ func CleanupOrphansExcept(maxSlots int, skipSlots map[int]bool) error {
 	return cleanupOrphansExcept(maxSlots, skipSlots, realCommander{})
 }
 
-func cleanupOrphans(maxSlots int, cmd commander) error {
-	return cleanupOrphansExcept(maxSlots, nil, cmd)
-}
-
 func cleanupOrphansExcept(maxSlots int, skipSlots map[int]bool, cmd commander) error {
 	slotsToCheck := slotsForCleanup(maxSlots)
 
@@ -87,28 +83,6 @@ func cleanupOrphansExcept(maxSlots int, skipSlots map[int]bool, cmd commander) e
 
 		if removeErr := os.Remove(sock); removeErr != nil && !os.IsNotExist(removeErr) {
 			errs = append(errs, fmt.Sprintf("slot %d remove socket: %v", slot, removeErr))
-		}
-	}
-
-	// Belt-and-suspenders: kill stray FC processes that may still hold a socket
-	// on non-skipped slots. Skips slots with no socket file to avoid spurious lsof
-	// calls and to avoid killing recovered sessions on live slots.
-	for _, slot := range slotsToCheck {
-		if skipSlots[slot] {
-			continue
-		}
-		sock := fmt.Sprintf("/tmp/rubbish-fc-%d.sock", slot)
-		if _, err := os.Stat(sock); os.IsNotExist(err) {
-			continue
-		}
-		out, err := cmd.command("lsof", "-t", sock).Output()
-		if err == nil {
-			pidStr := strings.TrimSpace(string(out))
-			if pidStr != "" {
-				if pid, parseErr := strconv.Atoi(pidStr); parseErr == nil {
-					killProcess(pid)
-				}
-			}
 		}
 	}
 
