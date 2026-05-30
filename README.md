@@ -13,7 +13,20 @@ offering.
 
 ---
 
-## Current Status
+## Project overview
+
+rubbish gives you a browser-accessible terminal where Claude Code runs inside a
+Firecracker microVM. You point it at a git repo and branch, the system boots a
+fresh VM (CoW snapshot of a shared base image, ~36 ms), SSH is ready in ~1.1 s,
+and you have a full Claude Code session in your browser without anything touching
+your local machine.
+
+Each session gets its own isolated VM with a copy-on-write rootfs snapshot,
+NFS-mounted persistent workspace directories, and full internet access via NAT.
+
+---
+
+## Current status
 
 The PoC phase is complete and running. A full end-to-end session flow is
 functional:
@@ -24,14 +37,16 @@ functional:
 | SSH ready in VM (~1.1s) | ✅ working |
 | WebSocket → SSH → PTY bridge (~69ms setup) | ✅ working |
 | xterm.js browser terminal | ✅ working |
-| Claude Code authenticated and running in VM | ✅ working |
+| Claude Code 2.1.119 authenticated and running in VM | ✅ working |
 | Per-session dm-thin CoW rootfs snapshots | ✅ working |
 | NFS-mounted persistent `~/.claude/` (memory, projects) | ✅ working |
-| Git bare-repo cache + in-VM clone (Workflow C) | ✅ working |
-| Session persistence across restarts (JSON store) | ✅ working |
-| Multi-session with slot management | ✅ working |
+| Git bare-repo cache + in-VM clone | ✅ working |
+| Session persistence across restarts (SQLite store) | ✅ working |
+| 4 concurrent sessions with slot management | ✅ working |
+| virtiofs workspace share | ❌ stub only — Firecracker rejected virtiofs (PR #1351) |
+| Running as non-root | ❌ udev resets dm-thin device ownership; under investigation |
 | gRPC control plane daemon (`rubishd`) | 🔲 designed, not wired |
-| Shared workspace NFS storage | 🔲 designed, not implemented |
+| Shared workspace NFS storage (full design) | 🔲 designed, not implemented |
 | Multi-tenancy / auth | 🔲 not started |
 | Secrets management | 🔲 not started |
 
@@ -39,51 +54,59 @@ functional:
 
 ## Architecture
 
-### Running components (as of 2026-05)
+### Running components
 
-Two binaries run on the host as systemd services:
+Two Go binaries run on the host as systemd services:
 
 ```
 Browser (xterm.js)
-    │  WebSocket /ws
+    │  HTTP REST  :8080
+    ├─────────────────────────────────────────────────────┐
+    │  WebSocket  :8081                                   │
+    ▼                                                     ▼
+rubbish-poc :8080                           rubbish-terminal :8081
+  — VM lifecycle, session management          — standalone WebSocket → SSH → PTY
+  — dm-thin snapshot creation                   proxy; restarts independently
+  — NFS mount setup                             of running VMs
+  — in-VM git clone
+  — SQLite session store
+    │  SSH (golang.org/x/crypto/ssh)
     ▼
-rubbish-poc :8080          — orchestrator: session lifecycle, VM launch, terminal proxy
-    ├── SessionStore        — JSON-backed session state (internal/sessionstore)
-    ├── SnapshotManager     — dm-thin CoW snapshots per session (internal/compute/firecracker)
-    ├── RepoCacheManager    — bare-repo cache + local clone (internal/gitutil)
-    ├── VM Launcher         — Firecracker via go-sdk (internal/vm)
-    └── Terminal Bridge     — WebSocket → SSH → PTY (internal/terminal)
-
-rubbish-terminal :8081     — standalone WebSocket terminal proxy (can restart independently)
+Firecracker microVM (172.16.0.x)
+    PTY → tmux → bash → claude
+    ▼
+Claude Code process
 ```
 
-```
-Host networking
-    br0  172.16.0.1/24  (Linux bridge)
-    tapN  per-session TAP device attached to bridge
-    iptables MASQUERADE: VM subnet → host uplink (VM gets full internet access)
+#### rubbish-poc (:8080)
 
-Storage
-    /dev/mapper/rubbish-pool       dm-thin sparse pool (100GB)
-    /dev/mapper/rubbish-base-ro    read-only base image snapshot
-    /dev/mapper/rubbish-session-N  per-session CoW snapshot (deleted on session end)
+Owns VM lifecycle end-to-end: creates per-session dm-thin CoW snapshots, injects
+per-slot network config, launches Firecracker via `firecracker-go-sdk`, waits for
+SSH, runs in-VM setup commands (`claude` user, NFS mounts, repo clone), and
+persists session state to SQLite (`/opt/rubbish/sessions.db`). Recovers sessions
+on restart.
 
-NFS mounts (dev-mode sessions)
-    host /opt/rubbish/dev-seed/claude/ → VM ~/.claude/
-        memory/    — persistent Claude memory across sessions
-        projects/  — persistent Claude project context
-```
+#### rubbish-terminal (:8081)
 
-```
-VM image: Alpine 3.21 (ext4, 4GB)
-    Go 1.26.2, Node.js 22, Claude Code
-    claude user (uid=1000, sudo NOPASSWD, SSH pubkey injected at boot)
-```
+Standalone WebSocket terminal proxy. Can restart independently of running VMs —
+active sessions reconnect automatically via a `{"type":"reconnect"}` signal so
+the browser auto-reconnects silently.
 
-### Planned architecture (control plane)
+### Internal packages
+
+| Package | Files | Responsibility |
+|---|---|---|
+| `internal/vm` | `launcher.go`, `cleanup.go`, `detached.go`, `snapshot.go` | Firecracker VM launch, TAP device creation, network config injection, cleanup |
+| `internal/compute/firecracker` | `snapshot.go` | dm-thin pool management: create/delete per-session CoW snapshots |
+| `internal/terminal` | `bridge.go` | WebSocket → SSH → PTY bridge |
+| `internal/session` | `statemachine.go` | Session state machine (creating → ready → stopped → …) |
+| `internal/sessionstore` | `store.go` | SQLite-backed session and favorites persistence |
+| `internal/gitutil` | `gitutil.go`, `repocache.go` | Repo name parsing, host-side bare-repo cache for fast in-VM clones |
+
+### Planned control plane
 
 See [docs/design-control-plane.md](docs/design-control-plane.md) for the full
-design. The daemon (`rubishd`) will expose:
+design. The `rubishd` daemon will expose:
 
 ```
 rubishd
@@ -98,6 +121,218 @@ All on a single port; gRPC multiplexed with WebSocket terminal streams.
 
 ---
 
+## Networking
+
+```
+Host
+  br0  172.16.0.1/24  (Linux bridge)
+    ├── tap0  →  VM slot 0  172.16.0.2
+    ├── tap1  →  VM slot 1  172.16.0.3
+    ├── tap2  →  VM slot 2  172.16.0.4
+    └── tap3  →  VM slot 3  172.16.0.5
+
+iptables -t nat -A POSTROUTING -s 172.16.0.0/24 -o <uplink> -j MASQUERADE
+```
+
+- Each VM slot gets a dedicated TAP device (`tap0`–`tap3`) attached to the `br0`
+  Linux bridge.
+- The static IP for each slot is injected into the rootfs ext4 image by
+  `vm.InjectNetworkConfig` before Firecracker boots — no DHCP needed.
+- iptables MASQUERADE gives VMs full internet access through the host's uplink.
+- NFS workspace mounts use the bridge IP (`172.16.0.1`) as the NFS server address.
+
+Set up with `scripts/setup-network.sh` (idempotent; run on first install and each
+host boot, or managed via systemd).
+
+---
+
+## Storage
+
+### dm-thin pool
+
+```
+/opt/rubbish/dm/
+  pool-data.img     — sparse data backing file  (100 GB)
+  pool-meta.img     — thin pool metadata
+  next-volume-id    — monotonic snapshot ID counter
+
+/dev/mapper/rubbish-pool         — active thin pool device
+/dev/mapper/rubbish-base-ro      — read-only base volume (imported from rootfs.ext4)
+/dev/mapper/rubbish-session-<id> — per-session writable CoW snapshot
+```
+
+The two image files back a device-mapper thin pool. Set up by
+`scripts/setup-storage.sh` and kept alive across reboots by
+`rubbish-storage.service` (`Type=oneshot`).
+
+### Per-session CoW snapshots
+
+`internal/compute/firecracker.SnapshotManager` creates a writable thin snapshot
+of `rubbish-base-ro` for each new session:
+
+```
+rubbish-base-ro  (read-only, never modified)
+  └── rubbish-session-<uuid>  (writable CoW — mounted as rootfs by Firecracker)
+```
+
+Snapshots are deleted when the session is stopped. The base volume is untouched.
+
+### NFS workspace mounts (dev-mode sessions)
+
+| Guest path | Host source |
+|---|---|
+| `~claude/.claude/memory/` | `/opt/rubbish/dev-seed/claude/.claude/memory/` |
+| `~claude/.claude/projects/` | `/opt/rubbish/dev-seed/claude/.claude/projects/` |
+
+Mounted at boot via NFS over the bridge (`172.16.0.1`). Claude Code memory and
+project context persist across VM restarts.
+
+---
+
+## VM image
+
+The VM image is an Alpine 3.21 ext4 filesystem (4 GB) built by
+`scripts/build-rootfs.sh`.
+
+**Contents:**
+
+- Alpine 3.21 (minirootfs base)
+- Go 1.24.3 at `/usr/local/go`
+- Node.js 22 (LTS)
+- Claude Code 2.1.119 (installed globally via npm)
+- openssh, bash, curl, git, nfs-utils
+- `claude` user (uid=1000, passwordless sudo, SSH pubkey pre-baked)
+
+**Build:**
+
+```bash
+# Run as root on a Linux host with loop-mount support
+sudo SSH_PUBKEY="$(cat ~/.ssh/id_ed25519.pub)" bash scripts/build-rootfs.sh
+# Output: /opt/rubbish/images/rootfs.ext4
+```
+
+`scripts/setup-storage.sh` then imports that ext4 image into the dm-thin pool as
+the read-only base volume `rubbish-base-ro`.
+
+---
+
+## REST API (:8080) and WebSocket (:8081)
+
+### rubbish-poc — REST API on :8080
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/` | xterm.js session UI (embedded HTML) |
+| `GET` | `/profile` | Profile management UI |
+| `GET` | `/api/saved-token` | Check whether a Claude OAuth token is saved |
+| `GET` | `/api/profile` | Return masked Claude OAuth and GitHub tokens |
+| `PUT` | `/api/profile` | Update Claude OAuth and/or GitHub tokens |
+| `GET` | `/api/sessions` | List all active sessions |
+| `POST` | `/api/sessions` | Create a session (boots a VM) |
+| `DELETE` | `/api/sessions/{id}` | Stop and destroy a session |
+| `POST` | `/api/sessions/{id}/start` | Restart a stopped session |
+| `POST` | `/api/sessions/{id}/favorite` | Save a session's repo/branch as a favorite |
+| `GET` | `/api/favorites` | List favorites |
+| `POST` | `/api/favorites` | Create a favorite |
+| `DELETE` | `/api/favorites/{id}` | Delete a favorite |
+
+**POST /api/sessions body:**
+
+```json
+{
+  "repo_url": "https://github.com/owner/repo",
+  "branch": "main",
+  "github_token": "ghp_...",
+  "dev_mode": true
+}
+```
+
+### rubbish-terminal — WebSocket on :8081
+
+| Path | Description |
+|---|---|
+| `GET /terminal/{session-id}` | Terminal HTML page for a session |
+| `GET /ws/{session-id}` | WebSocket endpoint — proxies to the VM over SSH |
+
+The WebSocket carries raw PTY bytes in each direction, plus a
+`{"type":"reconnect"}` JSON frame sent by the server before a graceful restart.
+
+---
+
+## Build and deploy
+
+### Prerequisites
+
+- Linux host with `/dev/kvm` (bare-metal or cloud VM with nested virt)
+- `dmsetup`, `thin-provisioning-tools` (`setup-storage.sh` installs these if absent)
+- `nfs-kernel-server` for dev-mode NFS mounts
+- Go 1.24+
+
+### Build binaries
+
+```bash
+go build -o rubbish-poc      ./cmd/poc
+go build -o rubbish-terminal ./cmd/terminal
+```
+
+### First-time host setup
+
+```bash
+# 1. Bridge + NAT networking
+sudo bash scripts/setup-network.sh
+
+# 2. dm-thin pool + base volume (idempotent — safe to re-run on reboot)
+sudo bash scripts/setup-storage.sh
+
+# 3. Build VM rootfs image
+sudo SSH_PUBKEY="$(cat ~/.ssh/id_ed25519.pub)" bash scripts/build-rootfs.sh
+
+# 4. Generate SSH key for VM access
+sudo ssh-keygen -t ed25519 -f /opt/rubbish/ssh/id_ed25519 -N ""
+
+# (Optional) full host setup including users, paths, systemd units:
+sudo bash scripts/setup-host.sh
+```
+
+### Deploy binaries
+
+```bash
+sudo cp rubbish-poc      /usr/local/bin/rubbish-poc
+sudo cp rubbish-terminal /usr/local/bin/rubbish-terminal
+# Or use the deploy helper (on the test box):
+sudo rubbish-deploy rubbish-poc
+sudo rubbish-deploy rubbish-terminal
+```
+
+### systemd services
+
+Three unit files are in `scripts/`:
+
+| Unit file | Binary | Description |
+|---|---|---|
+| `rubbish-storage.service` | `rubbish-setup-storage` | Sets up dm-thin pool at boot (`Type=oneshot`) |
+| `rubbish-poc.service` | `rubbish-poc --key /opt/rubbish/ssh/id_ed25519` | VM manager on :8080 |
+| `rubbish-terminal.service` | `rubbish-terminal --key … --db /opt/rubbish/sessions.db` | Terminal proxy on :8081 |
+
+Install:
+
+```bash
+sudo cp scripts/rubbish-storage.service  /etc/systemd/system/
+sudo cp scripts/rubbish-poc.service      /etc/systemd/system/
+sudo cp scripts/rubbish-terminal.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now rubbish-storage rubbish-poc rubbish-terminal
+```
+
+Logs:
+
+```bash
+tail -f /var/log/rubbish.log           # rubbish-poc
+tail -f /var/log/rubbish-terminal.log  # rubbish-terminal
+```
+
+---
+
 ## Roadmap
 
 ### Phase 1 — PoC (complete)
@@ -106,8 +341,8 @@ All on a single port; gRPC multiplexed with WebSocket terminal streams.
 - [x] Claude Code authenticated and running in VM
 - [x] Per-session dm-thin CoW rootfs snapshots
 - [x] Persistent dev-mode mounts (`~/.claude/memory/`, `~/.claude/projects/`)
-- [x] Bare-repo cache + in-VM git clone (Workflow C)
-- [x] Multi-session slot management
+- [x] Bare-repo cache + in-VM git clone
+- [x] Multi-session slot management (4 slots)
 
 ### Phase 2 — Shared workspace storage
 See [docs/design-shared-workspace.md](docs/design-shared-workspace.md).
@@ -132,64 +367,39 @@ See [docs/design-control-plane.md](docs/design-control-plane.md).
 - [ ] YAML config file
 
 ### Phase 5 — Harden
-- [ ] Permissions: run Firecracker as dedicated `firecracker` user (udev rule for dm-thin)
+- [ ] Permissions: run Firecracker as dedicated `firecracker` user (udev rule for dm-thin ownership)
 - [ ] Secrets: agentsecrets integration for env-var injection at VM boot
 - [ ] Multi-tenancy: team model, auth layer, web UI beyond raw xterm.js
 
 ---
 
-## Development Setup
-
-**Requirements:** Linux host with KVM support (bare-metal or cloud VM), Go 1.24+.
-
-```bash
-# One-time: build the VM rootfs image (requires root, loop-mount support)
-sudo SSH_PUBKEY="$(cat ~/.ssh/id_ed25519.pub)" bash scripts/build-rootfs.sh
-
-# One-time: set up bridge networking and iptables NAT
-sudo bash scripts/setup-network.sh
-
-# One-time: set up host tools, users, dm-thin pool, systemd units
-sudo bash scripts/setup-host.sh
-
-# Build and deploy the PoC binary
-go build ./cmd/poc
-sudo rubbish-deploy ./poc
-
-# Run directly (as rubbish user, with SSH key for VM access)
-sudo -u rubbish ./poc /opt/rubbish/ssh/id_ed25519
-```
-
-Browse to `http://<host>:8080` for the terminal UI.
-
----
-
-## Repo Layout
+## Repo layout
 
 ```
 cmd/
-  poc/           — PoC orchestrator binary (session lifecycle + terminal proxy)
-  terminal/      — Standalone terminal WebSocket proxy
+  poc/           — PoC orchestrator binary (session lifecycle + REST API)
+  terminal/      — Standalone WebSocket terminal proxy
   rubishd/       — Control plane daemon entry point (not yet wired)
 internal/
   compute/firecracker/   — dm-thin snapshot manager
   gitutil/               — bare-repo cache, repo cloning helpers
-  profile/               — session profile store
+  profile/               — Claude OAuth / GitHub token store
   session/               — session state machine
-  sessionstore/          — JSON-backed session persistence
+  sessionstore/          — SQLite session + favorites store
   terminal/              — WebSocket → SSH → PTY bridge
   vm/                    — Firecracker VM launcher + cleanup
-proto/                   — gRPC service definitions
+proto/                   — gRPC service definitions (future control plane)
+gen/                     — generated protobuf Go code
 docs/                    — design documents (workspace, rootfs, control plane)
-scripts/                 — host setup, rootfs build, networking
+scripts/                 — host setup, rootfs build, networking, storage, systemd units
 PROJECT.md               — vision and full roadmap detail
-CHECKPOINT.md            — agent handoff context (current state, known issues)
+CHECKPOINT.md            — agent handoff context (current state, known bugs)
 RESEARCH_NOTES.md        — debugging findings
 ```
 
 ---
 
-## Key Dependencies
+## Key dependencies
 
 - [`github.com/firecracker-microvm/firecracker-go-sdk`](https://github.com/firecracker-microvm/firecracker-go-sdk) — Firecracker VM management
 - [`github.com/gorilla/websocket`](https://github.com/gorilla/websocket) — WebSocket server
