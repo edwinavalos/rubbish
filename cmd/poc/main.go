@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -22,12 +23,21 @@ import (
 	"github.com/google/uuid"
 	fc "github.com/edwinavalos/rubbish/internal/compute/firecracker"
 	"github.com/edwinavalos/rubbish/internal/gitutil"
+	"github.com/edwinavalos/rubbish/internal/mcp"
 	"github.com/edwinavalos/rubbish/internal/profile"
 	"github.com/edwinavalos/rubbish/internal/session"
 	"github.com/edwinavalos/rubbish/internal/sessionstore"
 	"github.com/edwinavalos/rubbish/internal/terminal"
 	"github.com/edwinavalos/rubbish/internal/vm"
+	"github.com/edwinavalos/rubbish/internal/workflow"
 	"golang.org/x/crypto/ssh"
+)
+
+// Compile-time interface checks.
+var (
+	_ workflow.SessionStarter = (*SessionManager)(nil)
+	_ mcp.WorkflowHandler     = (*workflow.Engine)(nil)
+	_ mcp.SessionHandler      = (*SessionManager)(nil)
 )
 
 //go:embed static/index.html
@@ -735,6 +745,142 @@ func (m *SessionManager) StopAll() {
 	}
 }
 
+// ---- workflow.SessionStarter adapter methods --------------------------------
+
+// CreateSession implements workflow.SessionStarter. It creates a non-interactive
+// session and returns its ID.
+func (m *SessionManager) CreateSession(ctx context.Context, role, prompt, repoURL, branch string) (string, error) {
+	sess, err := m.Create(ctx, repoURL, branch, "", false, role, prompt)
+	if err != nil {
+		return "", err
+	}
+	return sess.ID, nil
+}
+
+// WaitForSession implements workflow.SessionStarter. It polls the session store
+// every 2 seconds until the session reaches StateStopped (returns Result) or
+// StateFailed (returns an error). Returns ctx.Err() if the context expires.
+func (m *SessionManager) WaitForSession(ctx context.Context, id string) (string, error) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-ticker.C:
+			if m.store != nil {
+				row, ok, err := m.store.Get(id)
+				if err != nil {
+					return "", fmt.Errorf("WaitForSession store.Get: %w", err)
+				}
+				if !ok {
+					return "", fmt.Errorf("session %s not found", id)
+				}
+				switch session.State(row.Status) {
+				case session.StateStopped:
+					return row.Result, nil
+				case session.StateFailed:
+					return "", fmt.Errorf("session failed: %s", row.ErrorMsg)
+				}
+				continue
+			}
+			// Fallback: use in-memory map when there is no persistent store.
+			m.mu.RLock()
+			sess, ok := m.sessions[id]
+			m.mu.RUnlock()
+			if !ok {
+				return "", fmt.Errorf("session %s not found", id)
+			}
+			switch sess.sm.State() {
+			case session.StateStopped:
+				m.mu.RLock()
+				result := sess.Result
+				m.mu.RUnlock()
+				return result, nil
+			case session.StateFailed:
+				return "", fmt.Errorf("session failed: %s", sess.Error)
+			}
+		}
+	}
+}
+
+// ---- mcp.SessionHandler adapter methods ------------------------------------
+
+// GetSession implements mcp.SessionHandler. Returns the sessionstore.Row cast to any.
+func (m *SessionManager) GetSession(id string) (any, bool) {
+	if m.store != nil {
+		row, ok, err := m.store.Get(id)
+		if err != nil || !ok {
+			return nil, false
+		}
+		return row, true
+	}
+	// Fallback: build a Row from the in-memory session.
+	m.mu.RLock()
+	sess, ok := m.sessions[id]
+	m.mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	m.mu.RLock()
+	row := sessionstore.Row{
+		ID:        sess.ID,
+		Slot:      sess.Slot,
+		Status:    string(sess.sm.State()),
+		RepoURL:   sess.RepoURL,
+		Branch:    sess.Branch,
+		ErrorMsg:  sess.Error,
+		DevMode:   sess.DevMode,
+		CreatedAt: sess.CreatedAt,
+		Role:      sess.Role,
+		Prompt:    sess.Prompt,
+		Result:    sess.Result,
+	}
+	m.mu.RUnlock()
+	return row, true
+}
+
+// ListSessions implements mcp.SessionHandler. Returns all session rows as []any.
+func (m *SessionManager) ListSessions() ([]any, error) {
+	if m.store != nil {
+		rows, err := m.store.List()
+		if err != nil {
+			return nil, err
+		}
+		out := make([]any, len(rows))
+		for i, r := range rows {
+			out[i] = r
+		}
+		return out, nil
+	}
+	// Fallback: build from in-memory sessions.
+	sessions := m.List()
+	out := make([]any, len(sessions))
+	for i, sess := range sessions {
+		m.mu.RLock()
+		out[i] = sessionstore.Row{
+			ID:        sess.ID,
+			Slot:      sess.Slot,
+			Status:    string(sess.sm.State()),
+			RepoURL:   sess.RepoURL,
+			Branch:    sess.Branch,
+			ErrorMsg:  sess.Error,
+			DevMode:   sess.DevMode,
+			CreatedAt: sess.CreatedAt,
+			Role:      sess.Role,
+			Prompt:    sess.Prompt,
+			Result:    sess.Result,
+		}
+		m.mu.RUnlock()
+	}
+	return out, nil
+}
+
+// StopSession implements mcp.SessionHandler. Delegates to Stop().
+func (m *SessionManager) StopSession(id string) error {
+	return m.Stop(id)
+}
+
 // loadFromDB populates the manager with sessions persisted in the store.
 // For ready sessions whose Firecracker process is still alive (server restart),
 // it reconnects them using a DetachedVM. For sessions that cannot be recovered
@@ -1279,8 +1425,19 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	wfStore, err := workflow.Open(filepath.Join(filepath.Dir("/opt/rubbish/sessions.db"), "workflows.json"))
+	if err != nil {
+		log.Fatalf("open workflow store: %v", err)
+	}
+
+	engine := workflow.NewEngine(wfStore, mgr, 3)
+	engine.RecoverInProgress(ctx) //nolint:errcheck
+
 	mux := http.NewServeMux()
 	registerHandlers(mux, mgr, ctx)
+
+	mcpServer := mcp.NewServer(engine, mgr)
+	mux.Handle("/mcp", mcpServer)
 
 	srv := &http.Server{
 		Addr:              ":8080",
