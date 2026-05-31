@@ -218,14 +218,38 @@ func registerTools(s *Server) {
 
 	s.register(Tool{
 		Name: "get_session",
-		Description: "Get the status and result of a session. " +
-			"Result is truncated to 4000 characters by default; check ResultBytesFull for total size. " +
-			"Set include_full_result=true to get the complete result (may be very large). " +
-			"Prompt is always omitted.",
+		Description: "Get session metadata (status, role, repo, timestamps). " +
+			"Result content is never included — use get_session_result to fetch it. " +
+			"If a result exists, ResultBytesFull shows its size.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"session_id":          map[string]any{"type": "string", "description": "Session ID returned by create_session"},
+				"session_id": map[string]any{"type": "string", "description": "Session ID returned by create_session"},
+			},
+			"required": []string{"session_id"},
+		},
+		Handler: func(ctx context.Context, args map[string]any) (string, error) {
+			if s.sh == nil {
+				return "not implemented", nil
+			}
+			id, _ := args["session_id"].(string)
+			sess, ok := s.sh.GetSession(id)
+			if !ok {
+				return "not found", nil
+			}
+			return slimSession(sess, false, 0)
+		},
+	})
+
+	s.register(Tool{
+		Name: "get_session_result",
+		Description: "Fetch the Result text of a completed session. " +
+			"Truncated to 4000 characters by default; set include_full_result=true for the complete output (may be very large). " +
+			"Check ResultBytesFull to see total size before requesting the full result.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"session_id":          map[string]any{"type": "string", "description": "Session ID"},
 				"include_full_result": map[string]any{"type": "boolean", "description": "Return full Result text (default false, truncates at 4000 chars)"},
 			},
 			"required": []string{"session_id"},
@@ -240,12 +264,11 @@ func registerTools(s *Server) {
 			if !ok {
 				return "not found", nil
 			}
-			return slimSession(sess, true, func() int {
-				if includeFullResult {
-					return 1<<31 - 1
-				}
-				return 4000
-			}())
+			maxBytes := 4000
+			if includeFullResult {
+				maxBytes = 1<<31 - 1
+			}
+			return slimSession(sess, true, maxBytes)
 		},
 	})
 
