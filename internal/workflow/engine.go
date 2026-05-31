@@ -193,7 +193,7 @@ func (e *Engine) run(ctx context.Context, id string) {
 			stage := &wf.Stages[stageIdx]
 			taskDesc := stage.Input // captured before any mutation
 
-			implCtx, implCancel := context.WithTimeout(ctx, 30*time.Minute)
+			implCtx, implCancel := context.WithTimeout(ctx, 45*time.Minute)
 			defer implCancel()
 
 			prompt := "You are a coding agent. Complete the following task.\n\n" +
