@@ -63,14 +63,14 @@
     }
 
     header {
-      display: flex;
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
       align-items: center;
       padding: 0 24px;
       height: 52px;
       border-bottom: 1px solid var(--border);
       background: var(--surface);
       flex-shrink: 0;
-      gap: 16px;
     }
 
     .logo {
@@ -81,14 +81,16 @@
       text-decoration: none;
     }
 
-    header nav { display: flex; gap: 16px; }
+    header nav { display: flex; gap: 4px; }
     header nav a {
-      color: var(--text-muted);
+      color: var(--text-dim);
       text-decoration: none;
       font-size: 12px;
+      padding: 5px 10px;
+      border-radius: 4px;
     }
-    header nav a:hover { color: var(--text-secondary); }
-    header nav a.active { color: var(--text-secondary); }
+    header nav a:hover { color: var(--text-muted); background: rgba(255,255,255,0.04); }
+    header nav a.active { color: var(--text-secondary); background: rgba(255,255,255,0.07); }
 
     main {
       max-width: 560px;
@@ -195,6 +197,7 @@
       <a href="/orchestrator">orchestrator</a>
       <a href="/profile" class="active">profile</a>
     </nav>
+    <div></div>
   </header>
 
   <main>

@@ -66,14 +66,19 @@
 
     /* ── Header ── */
     header {
-      display: flex;
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
       align-items: center;
-      justify-content: space-between;
       padding: 0 24px;
       height: 52px;
       border-bottom: 1px solid var(--border);
       background: var(--surface);
       flex-shrink: 0;
+    }
+    .header-right {
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
     }
     .logo {
       font-size: 18px;
@@ -81,6 +86,19 @@
       color: var(--accent);
       letter-spacing: -0.5px;
     }
+    nav {
+      display: flex;
+      gap: 4px;
+    }
+    nav a {
+      color: var(--text-dim);
+      text-decoration: none;
+      font-size: 12px;
+      padding: 5px 10px;
+      border-radius: 4px;
+    }
+    nav a:hover { color: var(--text-muted); background: rgba(255,255,255,0.04); }
+    nav a.active { color: var(--text-secondary); background: rgba(255,255,255,0.07); }
     .btn-new {
       background: var(--accent);
       color: #fff;
@@ -92,9 +110,6 @@
       cursor: pointer;
     }
     .btn-new:hover { background: var(--accent-hover); }
-
-    .nav-link { color: var(--text-muted); text-decoration: none; font-size: 12px; }
-    .nav-link:hover { color: var(--text-secondary); }
 
     /* ── Body layout ── */
     .body-layout {
@@ -508,11 +523,14 @@
 
 <header>
   <span class="logo">rubbish</span>
-  <nav style="display:flex;gap:16px;margin-left:16px;">
-    <a href="/orchestrator" class="nav-link">orchestrator</a>
-    <a href="/profile" class="nav-link">profile</a>
+  <nav>
+    <a href="/" class="active">sessions</a>
+    <a href="/orchestrator">orchestrator</a>
+    <a href="/profile">profile</a>
   </nav>
-  <button class="btn-new" id="btnNew">+ New Session</button>
+  <div class="header-right">
+    <button class="btn-new" id="btnNew">+ New Session</button>
+  </div>
 </header>
 
 <div class="body-layout">
