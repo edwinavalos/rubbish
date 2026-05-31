@@ -19,11 +19,13 @@ import (
 // so Resume() can re-run it once limits reset.
 var ErrUsageLimit = errors.New("usage limit reached")
 
-// isUsageLimitResult reports whether a session result string signals that the
-// Claude API usage limit was hit rather than a real agent output.
-func isUsageLimitResult(result string) bool {
-	return strings.Contains(result, "monthly usage limit") ||
-		strings.Contains(result, "usage limit")
+// IsUsageLimitError reports whether s indicates a Claude API usage limit was
+// reached. It matches the "You've hit your" prefix common to all Claude limit
+// messages (monthly, weekly, session, Opus limits). This is intentionally
+// specific to avoid false positives on task output that mentions usage limits.
+func IsUsageLimitError(s string) bool {
+	return strings.Contains(s, "You've hit your") ||
+		strings.Contains(s, "you've hit your")
 }
 
 // SessionStarter is the subset of SessionManager the engine needs.
@@ -333,14 +335,19 @@ func (e *Engine) runStage(ctx context.Context, wfID, stageID string, kind StageK
 	// --- wait for result ---
 	result, err := e.sessions.WaitForSession(ctx, sessionID)
 	if err != nil {
+		// Primary: session layer detected the limit via stderr and wrapped ErrUsageLimit.
+		if errors.Is(err, ErrUsageLimit) {
+			slog.Warn("workflow: stage hit usage limit", "workflow", wfID[:8], "stage", stageID)
+			return e.markStageFailed(wfID, stageID, fmt.Errorf("%w (session %s)", ErrUsageLimit, sessionID))
+		}
 		return e.markStageFailed(wfID, stageID, fmt.Errorf("session %s: %w", sessionID, err))
 	}
 
-	// Detect usage-limit responses — the session "succeeds" but the agent never ran.
-	// Fail the stage so Resume() can re-run it once limits reset.
-	if isUsageLimitResult(result) {
-		slog.Warn("workflow: stage hit usage limit", "workflow", wfID[:8], "stage", stageID)
-		return e.markStageFailed(wfID, stageID, fmt.Errorf("%w (session %s)", ErrUsageLimit, sessionID))
+	// Fallback: if the limit message slipped into stdout (text-mode CLI without
+	// --output-format json), catch it here before storing garbage as a result.
+	if IsUsageLimitError(result) {
+		slog.Warn("workflow: usage limit in result text (fallback)", "workflow", wfID[:8], "stage", stageID)
+		return e.markStageFailed(wfID, stageID, fmt.Errorf("%w (session %s, detected in output)", ErrUsageLimit, sessionID))
 	}
 
 	// --- mark done ---

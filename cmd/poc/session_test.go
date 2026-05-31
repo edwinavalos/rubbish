@@ -64,7 +64,13 @@ func (f *fakeLauncher) Launch(_ context.Context, _ int, _ string, _ int64) (vmHa
 	return f.handle, nil
 }
 
-type fakeSetupRunner struct{ runN atomic.Int32 }
+type fakeSetupRunner struct {
+	runN atomic.Int32
+	// RunCapture response — set per test to control non-interactive path
+	captureStdout string
+	captureStderr string
+	captureErr    error
+}
 
 func (f *fakeSetupRunner) RunSetup(_ []string) error {
 	f.runN.Add(1)
@@ -74,6 +80,11 @@ func (f *fakeSetupRunner) RunSetup(_ []string) error {
 func (f *fakeSetupRunner) RunSetupCapture(_ []string, _ io.Writer) error {
 	f.runN.Add(1)
 	return nil
+}
+
+func (f *fakeSetupRunner) RunCapture(_ string) (stdout, stderr string, err error) {
+	f.runN.Add(1)
+	return f.captureStdout, f.captureStderr, f.captureErr
 }
 
 type fakeBridgeFactory struct{ runner setupRunner }

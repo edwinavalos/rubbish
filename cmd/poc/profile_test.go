@@ -34,6 +34,10 @@ func (r *capturingSetupRunner) RunSetupCapture(cmds []string, _ io.Writer) error
 	return r.RunSetup(cmds)
 }
 
+func (r *capturingSetupRunner) RunCapture(_ string) (string, string, error) {
+	return "", "", nil
+}
+
 func (r *capturingSetupRunner) allCmds() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -121,7 +125,7 @@ func newTestServerWithProfile(prof *profile.Store) *httptest.Server {
 		prof,
 	)
 	mux := http.NewServeMux()
-	registerHandlers(mux, mgr, context.Background())
+	registerHandlers(mux, mgr, nil, context.Background())
 	return httptest.NewServer(mux)
 }
 

@@ -70,6 +70,31 @@ type bridgeFactory interface {
 type setupRunner interface {
 	RunSetup(cmds []string) error
 	RunSetupCapture(cmds []string, w io.Writer) error
+	// RunCapture runs a single command and returns stdout and stderr separately.
+	// Used for the non-interactive claude -p invocation so we can inspect stderr
+	// for usage-limit errors without false-positives from task output.
+	RunCapture(cmd string) (stdout, stderr string, err error)
+}
+
+// claudeJSONOutput is the parsed result of `claude -p --output-format json`.
+type claudeJSONOutput struct {
+	Result  string `json:"result"`
+	IsError bool   `json:"is_error"`
+}
+
+// parseClaudeJSON extracts the result text from claude's JSON output.
+// Falls back to the raw string if stdout is not valid JSON, so old/text-mode
+// invocations continue to work without modification.
+func parseClaudeJSON(stdout string) (result string, isError bool) {
+	stdout = strings.TrimSpace(stdout)
+	if stdout == "" {
+		return "", false
+	}
+	var r claudeJSONOutput
+	if err := json.Unmarshal([]byte(stdout), &r); err != nil {
+		return stdout, false
+	}
+	return r.Result, r.IsError
 }
 
 // ---- Real adapters ----------------------------------------------------------
@@ -563,18 +588,49 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 	// 8. Non-interactive path: run claude -p, capture output, then stop.
 	if sess.Role != "interactive" {
 		slog.Info("session: non-interactive mode, running claude -p", "session", sid, "role", sess.Role)
-		claudeCtx, claudeCancel := context.WithTimeout(ctx, 30*time.Minute)
-		defer claudeCancel()
-		_ = claudeCtx // context reserved for future SSH timeout integration
 
-		var buf strings.Builder
-		// Run via bash login shell so ~/.profile is sourced (CLAUDE_CODE_OAUTH_TOKEN etc.)
-		innerCmd := "claude --dangerously-skip-permissions -p " + shellQuote(sess.Prompt)
+		// --output-format json sends errors (including usage limits) to stderr and
+		// structured output to stdout, letting us distinguish them cleanly.
+		innerCmd := "claude --dangerously-skip-permissions --output-format json -p " + shellQuote(sess.Prompt)
 		cmd := "bash -lc " + shellQuote(innerCmd)
-		if err := sess.bridge.RunSetupCapture([]string{cmd}, &buf); err != nil {
-			slog.Warn("session: claude -p error", "session", sid, "err", err)
+		stdout, stderr, cmdErr := sess.bridge.RunCapture(cmd)
+		if cmdErr != nil {
+			slog.Warn("session: claude exit error", "session", sid, "err", cmdErr)
 		}
-		result := buf.String()
+
+		// Check stderr for usage-limit message before touching the result.
+		// With --output-format json, all errors including limit hits go to stderr.
+		if workflow.IsUsageLimitError(stderr) {
+			slog.Warn("session: usage limit detected", "session", sid)
+			m.mu.Lock()
+			sess.Error = "usage limit reached"
+			m.mu.Unlock()
+			if err := sess.sm.Transition(session.StateFailed); err != nil {
+				slog.Error("session: transition to failed error", "session", sid, "err", err)
+			}
+			m.persistSession(sess)
+			sess.cancel()
+			if sess.v != nil {
+				stopCtx, stopCancel := context.WithTimeout(context.Background(), 8*time.Second)
+				if err := sess.v.Stop(stopCtx); err != nil {
+					slog.Warn("session: stop vm after usage limit", "session", sid, "err", err)
+				}
+				stopCancel()
+				vm.WaitForVMDead(vm.SlotIP(sess.Slot))
+			}
+			m.snap.DeleteSnapshot(sess.ID) //nolint:errcheck
+			m.freeSlot(sess.Slot)
+			m.mu.Lock()
+			delete(m.sessions, sess.ID)
+			m.mu.Unlock()
+			if m.repoCache != nil {
+				m.repoCache.CleanupWorkspace(sess.ID)
+			}
+			return
+		}
+
+		// Parse the JSON result from stdout; fall back to raw text for compatibility.
+		result, _ := parseClaudeJSON(stdout)
 
 		m.mu.Lock()
 		sess.Result = result
@@ -788,6 +844,9 @@ func (m *SessionManager) WaitForSession(ctx context.Context, id string) (string,
 				case session.StateStopped:
 					return row.Result, nil
 				case session.StateFailed:
+					if strings.Contains(row.ErrorMsg, "usage limit") {
+						return "", fmt.Errorf("session failed: %s: %w", row.ErrorMsg, workflow.ErrUsageLimit)
+					}
 					return "", fmt.Errorf("session failed: %s", row.ErrorMsg)
 				}
 				continue
@@ -806,7 +865,13 @@ func (m *SessionManager) WaitForSession(ctx context.Context, id string) (string,
 				m.mu.RUnlock()
 				return result, nil
 			case session.StateFailed:
-				return "", fmt.Errorf("session failed: %s", sess.Error)
+				m.mu.RLock()
+				sessErr := sess.Error
+				m.mu.RUnlock()
+				if strings.Contains(sessErr, "usage limit") {
+					return "", fmt.Errorf("session failed: %s: %w", sessErr, workflow.ErrUsageLimit)
+				}
+				return "", fmt.Errorf("session failed: %s", sessErr)
 			}
 		}
 	}

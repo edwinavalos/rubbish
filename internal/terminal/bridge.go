@@ -69,6 +69,31 @@ func (b *Bridge) RunSetupCapture(commands []string, w io.Writer) error {
 	return nil
 }
 
+// RunCapture runs a single command and returns stdout and stderr separately.
+// Unlike RunSetupCapture, a non-zero exit code does not prevent output from
+// being returned — the exit error is returned alongside any captured output.
+// This is the right method for running claude -p, where we need to inspect
+// stderr independently from the result.
+func (b *Bridge) RunCapture(cmd string) (stdout, stderr string, err error) {
+	client, err := dialSSH(b.host, b.user, b.sshKey)
+	if err != nil {
+		return "", "", fmt.Errorf("ssh dial: %w", err)
+	}
+	defer client.Close()
+
+	sess, err := client.NewSession()
+	if err != nil {
+		return "", "", fmt.Errorf("new session: %w", err)
+	}
+	defer sess.Close()
+
+	var outBuf, errBuf bytes.Buffer
+	sess.Stdout = &outBuf
+	sess.Stderr = &errBuf
+	runErr := sess.Run(cmd)
+	return outBuf.String(), errBuf.String(), runErr
+}
+
 // Upgrade upgrades the HTTP connection to WebSocket and returns it. Use this
 // alongside Relay when the caller needs to register the connection with a hub
 // before the relay starts (e.g. for graceful-shutdown notification).
