@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>rubbish — orchestrator</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:             #0f0f0f;
+      --surface:        #111111;
+      --border:         #1e1e1e;
+      --border-strong:  #2a2a2a;
+      --text-primary:   #e0e0e0;
+      --text-secondary: #d1d5db;
+      --text-muted:     #9ca3af;
+      --text-dim:       #6b7280;
+      --text-dimmer:    #4b5563;
+      --text-empty:     #333333;
+      --text-heading:   #f3f4f6;
+      --accent:         #7c3aed;
+      --accent-hover:   #6d28d9;
+      --c-pending:      #4b5563;
+      --c-running:      #facc15;
+      --c-done:         #22c55e;
+      --c-failed:       #ef4444;
+    }
+
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg:             #f3f4f6;
+        --surface:        #ffffff;
+        --border:         #e5e7eb;
+        --border-strong:  #d1d5db;
+        --text-primary:   #111827;
+        --text-secondary: #374151;
+        --text-muted:     #6b7280;
+        --text-dim:       #9ca3af;
+        --text-dimmer:    #9ca3af;
+        --text-empty:     #d1d5db;
+        --text-heading:   #111827;
+        --c-pending:      #9ca3af;
+        --c-running:      #d97706;
+        --c-done:         #16a34a;
+        --c-failed:       #dc2626;
+      }
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text-primary);
+      font-family: 'Menlo', 'Monaco', 'Consolas', monospace;
+      font-size: 14px;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      padding: 0 24px;
+      height: 52px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+      flex-shrink: 0;
+    }
+    .logo { font-size: 18px; font-weight: 700; color: var(--accent); letter-spacing: -0.5px; text-decoration: none; }
+    nav { display: flex; gap: 16px; margin-left: 4px; }
+    nav a { color: var(--text-dim); text-decoration: none; font-size: 12px; padding: 3px 0; border-bottom: 2px solid transparent; }
+    nav a:hover { color: var(--text-muted); }
+    nav a.active { color: var(--text-secondary); border-bottom-color: var(--accent); }
+
+    .header-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+    .btn-demo {
+      background: transparent;
+      color: var(--accent);
+      border: 1px solid var(--accent);
+      padding: 5px 12px;
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .btn-demo:hover { background: var(--accent); color: #fff; }
+    .btn-demo:disabled { opacity: 0.45; cursor: default; }
+
+    .poll-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--c-done);
+      animation: blink 2s ease-in-out infinite;
+    }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.25} }
+
+    /* ── Layout ── */
+    main {
+      flex: 1;
+      padding: 28px 32px;
+      overflow-y: auto;
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 20px;
+    }
+    .section-title {
+      font-size: 12px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .filter-group { display: flex; gap: 6px; }
+    .filter-btn {
+      background: transparent;
+      border: 1px solid var(--border-strong);
+      color: var(--text-dim);
+      padding: 3px 10px;
+      border-radius: 3px;
+      font-family: inherit;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .filter-btn.active { border-color: var(--accent); color: var(--accent); }
+    .filter-btn:hover:not(.active) { color: var(--text-muted); border-color: var(--text-dimmer); }
+
+    /* ── Workflow cards ── */
+    .wf-list { display: flex; flex-direction: column; gap: 12px; }
+
+    .wf-card {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface);
+      overflow: hidden;
+    }
+    .wf-card.status-running { border-color: #2a2a00; }
+    .wf-card.status-done    { border-color: #0a2a0a; }
+    .wf-card.status-failed  { border-color: #2a0a0a; }
+
+    .wf-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 16px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .wf-header:hover { background: rgba(255,255,255,0.02); }
+
+    .wf-status-badge {
+      flex-shrink: 0;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 2px 7px;
+      border-radius: 3px;
+      border: 1px solid;
+    }
+    .wf-status-badge.queued   { color: var(--text-dim); border-color: var(--text-dimmer); }
+    .wf-status-badge.running  { color: var(--c-running); border-color: var(--c-running); animation: pulse 1.2s ease-in-out infinite; }
+    .wf-status-badge.done     { color: var(--c-done); border-color: var(--c-done); }
+    .wf-status-badge.failed   { color: var(--c-failed); border-color: var(--c-failed); }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.45} }
+
+    .wf-id { flex-shrink: 0; color: var(--text-muted); font-size: 11px; width: 70px; }
+    .wf-goal { flex: 1; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+    .wf-repo { flex-shrink: 0; color: var(--text-dim); font-size: 11px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wf-age  { flex-shrink: 0; color: var(--text-dimmer); font-size: 11px; width: 52px; text-align: right; }
+    .wf-chevron { flex-shrink: 0; color: var(--text-dimmer); font-size: 10px; transition: transform 0.15s; }
+    .wf-card.expanded .wf-chevron { transform: rotate(90deg); }
+
+    /* ── Pipeline ── */
+    .wf-pipeline {
+      display: none;
+      padding: 0 16px 16px;
+      border-top: 1px solid var(--border);
+    }
+    .wf-card.expanded .wf-pipeline { display: block; }
+
+    .pipeline-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 0;
+      flex-wrap: wrap;
+      padding-top: 14px;
+    }
+
+    .stage-node {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      min-width: 90px;
+    }
+
+    .stage-pill {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 5px 10px;
+      border-radius: 4px;
+      border: 1px solid;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .stage-pill.pending   { border-color: var(--c-pending); color: var(--c-pending); }
+    .stage-pill.running   { border-color: var(--c-running); color: var(--c-running); animation: pulse 1.2s ease-in-out infinite; }
+    .stage-pill.done      { border-color: var(--c-done);    color: var(--c-done); }
+    .stage-pill.failed    { border-color: var(--c-failed);  color: var(--c-failed); }
+
+    .stage-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .stage-pill.pending .stage-dot   { background: var(--c-pending); }
+    .stage-pill.running .stage-dot   { background: var(--c-running); }
+    .stage-pill.done    .stage-dot   { background: var(--c-done); }
+    .stage-pill.failed  .stage-dot   { background: var(--c-failed); }
+
+    .stage-session {
+      font-size: 9px;
+      color: var(--text-dimmer);
+      max-width: 88px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      text-align: center;
+    }
+
+    .pipeline-arrow {
+      align-self: center;
+      color: var(--text-dimmer);
+      font-size: 12px;
+      padding: 0 4px;
+      margin-top: -12px; /* align with pill center */
+    }
+
+    .impl-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .wf-meta {
+      padding-top: 10px;
+      display: flex;
+      gap: 16px;
+      font-size: 11px;
+      color: var(--text-dimmer);
+    }
+    .wf-error {
+      margin-top: 8px;
+      font-size: 11px;
+      color: var(--c-failed);
+    }
+
+    /* ── Actions ── */
+    .wf-actions { display: flex; gap: 6px; margin-top: 12px; }
+    .btn-resume {
+      background: transparent;
+      color: var(--c-running);
+      border: 1px solid var(--c-running);
+      padding: 3px 10px;
+      border-radius: 3px;
+      font-family: inherit;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .btn-resume:hover { background: var(--c-running); color: #000; }
+
+    /* ── Empty ── */
+    .empty-state {
+      color: var(--text-empty);
+      font-size: 13px;
+      padding: 60px 0;
+      text-align: center;
+      line-height: 1.8;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <a class="logo" href="/">rubbish</a>
+  <nav>
+    <a href="/">sessions</a>
+    <a href="/orchestrator" class="active">orchestrator</a>
+    <a href="/profile">profile</a>
+  </nav>
+  <div class="header-right">
+    <div class="poll-dot" title="live polling"></div>
+    <button class="btn-demo" id="btnDemo">▶ run demo workflow</button>
+  </div>
+</header>
+
+<main>
+  <div class="toolbar">
+    <div class="section-title" id="sectionTitle">Workflows</div>
+    <div class="filter-group">
+      <button class="filter-btn active" data-filter="active" id="fActive">active</button>
+      <button class="filter-btn" data-filter="all" id="fAll">all</button>
+    </div>
+  </div>
+  <div class="wf-list" id="wfList">
+    <div class="empty-state">No workflows yet.<br>Submit one via MCP or click "run demo workflow".</div>
+  </div>
+</main>
+
+<script>
+  const $ = id => document.getElementById(id);
+
+  // ── State ──────────────────────────────────────────────────────────────────
+
+  let filter = 'active'; // 'active' | 'all'
+  let expandedIDs = new Set();
+  let workflows = [];
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+
+  function timeAgo(isoStr) {
+    if (!isoStr) return '';
+    const diff = Math.floor((Date.now() - new Date(isoStr)) / 1000);
+    if (diff < 60)   return `${diff}s ago`;
+    if (diff < 3600) return `${Math.floor(diff/60)}m ago`;
+    return `${Math.floor(diff/3600)}h ago`;
+  }
+
+  function repoShort(url) {
+    if (!url) return '';
+    const m = url.match(/github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/);
+    if (m) return m[1];
+    return url.replace(/^https?:\/\//, '').replace(/\.git$/, '');
+  }
+
+  function truncate(s, n) {
+    if (!s) return '—';
+    return s.length > n ? s.slice(0, n) + '…' : s;
+  }
+
+  // ── Fetch & Render ─────────────────────────────────────────────────────────
+
+  async function loadWorkflows() {
+    try {
+      const res = await fetch('/api/workflows');
+      if (!res.ok) return;
+      workflows = await res.json() || [];
+      render();
+    } catch (e) { /* network, retry */ }
+  }
+
+  function render() {
+    const ACTIVE = new Set(['queued', 'running']);
+    const list = filter === 'active'
+      ? workflows.filter(w => ACTIVE.has(w.Status))
+      : workflows;
+
+    const activeCount = workflows.filter(w => ACTIVE.has(w.Status)).length;
+    $('sectionTitle').textContent = activeCount
+      ? `Workflows (${activeCount} active)`
+      : 'Workflows';
+
+    if (list.length === 0) {
+      $('wfList').innerHTML = filter === 'active'
+        ? '<div class="empty-state">No active workflows.<br>Submit one via MCP or click "run demo workflow".</div>'
+        : '<div class="empty-state">No workflows yet.</div>';
+      return;
+    }
+
+    $('wfList').innerHTML = list.map(renderWorkflow).join('');
+  }
+
+  function renderWorkflow(wf) {
+    const status = (wf.Status || 'queued').toLowerCase();
+    const isExpanded = expandedIDs.has(wf.ID);
+    const shortID = wf.ID.slice(0, 8);
+    const repo = repoShort(wf.RepoURL);
+    const stages = wf.Stages || [];
+
+    // split stages by kind
+    const research = stages.find(s => s.Kind === 'research');
+    const plan     = stages.find(s => s.Kind === 'plan');
+    const impls    = stages.filter(s => s.Kind === 'implement');
+
+    const pipelineHTML = buildPipeline(research, plan, impls);
+
+    const resumeBtn = (status === 'failed')
+      ? `<button class="btn-resume" onclick="resumeWorkflow('${wf.ID}')">↺ resume</button>`
+      : '';
+
+    const errorLine = wf.Error
+      ? `<div class="wf-error">✕ ${escHtml(wf.Error)}</div>`
+      : '';
+
+    return `
+      <div class="wf-card status-${status} ${isExpanded ? 'expanded' : ''}" id="wf-${wf.ID}">
+        <div class="wf-header" onclick="toggleExpand('${wf.ID}')">
+          <span class="wf-status-badge ${status}">${status}</span>
+          <span class="wf-id" title="${wf.ID}">${shortID}</span>
+          <span class="wf-goal" title="${escHtml(wf.Input || '')}">${truncate(wf.Input || 'no goal', 80)}</span>
+          ${repo ? `<span class="wf-repo" title="${escHtml(wf.RepoURL)}">${escHtml(repo)}</span>` : ''}
+          <span class="wf-age">${timeAgo(wf.CreatedAt)}</span>
+          <span class="wf-chevron">▶</span>
+        </div>
+        <div class="wf-pipeline">
+          ${pipelineHTML}
+          <div class="wf-meta">
+            <span>id: ${wf.ID}</span>
+            ${wf.Branch ? `<span>branch: ${escHtml(wf.Branch)}</span>` : ''}
+            ${wf.UpdatedAt ? `<span>updated: ${timeAgo(wf.UpdatedAt)}</span>` : ''}
+            <span>stages: ${stages.length}</span>
+          </div>
+          ${errorLine}
+          ${resumeBtn ? `<div class="wf-actions">${resumeBtn}</div>` : ''}
+        </div>
+      </div>`;
+  }
+
+  function buildPipeline(research, plan, impls) {
+    const parts = [];
+
+    if (research) {
+      parts.push(stageNode(research));
+    }
+    if (plan) {
+      if (parts.length) parts.push('<span class="pipeline-arrow">→</span>');
+      parts.push(stageNode(plan));
+    }
+
+    if (impls.length > 0) {
+      if (parts.length) parts.push('<span class="pipeline-arrow">→</span>');
+      const implNodes = impls.map(s => stageNode(s)).join('');
+      parts.push(`<div class="impl-group">${implNodes}</div>`);
+    }
+
+    if (parts.length === 0) {
+      return '<div style="color:var(--text-dimmer);font-size:11px;padding-top:10px;">No stages yet.</div>';
+    }
+
+    return `<div class="pipeline-row">${parts.join('')}</div>`;
+  }
+
+  function stageNode(s) {
+    const status = (s.Status || 'pending').toLowerCase();
+    const label  = s.Kind || 'stage';
+    const sessShort = s.SessionID ? s.SessionID.slice(0, 8) : '';
+    return `
+      <div class="stage-node">
+        <div class="stage-pill ${status}">
+          <span class="stage-dot"></span>
+          ${escHtml(label)}
+        </div>
+        ${sessShort ? `<span class="stage-session">${sessShort}</span>` : '<span class="stage-session">—</span>'}
+      </div>`;
+  }
+
+  function escHtml(s) {
+    return String(s)
+      .replace(/&/g,'&amp;')
+      .replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;');
+  }
+
+  // ── Interactions ───────────────────────────────────────────────────────────
+
+  function toggleExpand(id) {
+    if (expandedIDs.has(id)) {
+      expandedIDs.delete(id);
+    } else {
+      expandedIDs.add(id);
+    }
+    render();
+  }
+
+  async function resumeWorkflow(id) {
+    try {
+      await fetch(`/api/workflows/${id}/resume`, { method: 'POST' });
+    } catch (e) { /* ignore */ }
+    setTimeout(loadWorkflows, 300);
+  }
+
+  $('btnDemo').addEventListener('click', async () => {
+    const btn = $('btnDemo');
+    btn.disabled = true;
+    btn.textContent = 'starting…';
+    try {
+      const res = await fetch('/api/dev/test-workflow', { method: 'POST' });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      // expand the new workflow
+      expandedIDs.add(data.workflow_id);
+      await loadWorkflows();
+    } catch (e) {
+      alert('Failed to start demo: ' + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '▶ run demo workflow';
+    }
+  });
+
+  // filter buttons
+  document.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      filter = btn.dataset.filter;
+      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      render();
+    });
+  });
+
+  // ── Init ───────────────────────────────────────────────────────────────────
+  loadWorkflows();
+  setInterval(loadWorkflows, 2000);
+</script>
+</body>
+</html>

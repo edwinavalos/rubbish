@@ -560,3 +560,122 @@ func (e *Engine) List() []any {
 	}
 	return out
 }
+
+// InjectDemoWorkflow creates a fake workflow that simulates the full
+// research→plan→implement pipeline with artificial delays. It does not call
+// Claude and does not require any VM slots. Use it to exercise the orchestrator
+// UI without incurring real usage costs.
+func (e *Engine) InjectDemoWorkflow(ctx context.Context) (string, error) {
+	id, err := newID()
+	if err != nil {
+		return "", err
+	}
+
+	now := time.Now()
+	wf := &Workflow{
+		ID:        id,
+		Input:     "demo: simulate a 3-task implement workflow",
+		RepoURL:   "https://github.com/edwinavalos/rubbish.git",
+		Branch:    "main",
+		Status:    StatusQueued,
+		CreatedAt: now,
+		Stages: []Stage{
+			{ID: id + "-research", Kind: KindResearch, Status: StagePending},
+			{ID: id + "-plan", Kind: KindPlan, Status: StagePending},
+		},
+	}
+	if err := e.store.Upsert(wf); err != nil {
+		return "", fmt.Errorf("persist demo workflow: %w", err)
+	}
+
+	go e.runDemo(e.serverCtx, id)
+	return id, nil
+}
+
+func (e *Engine) runDemo(ctx context.Context, id string) {
+	step := func(stageID string, kind StageKind, dur time.Duration) bool {
+		wf, ok := e.store.Get(id)
+		if !ok {
+			return false
+		}
+		// mark running
+		for i := range wf.Stages {
+			if wf.Stages[i].ID == stageID {
+				wf.Stages[i].Status = StageRunning
+				wf.Stages[i].SessionID = "demo-" + stageID[len(id)+1:]
+			}
+		}
+		wf.Status = StatusRunning
+		_ = e.store.Upsert(wf)
+
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(dur):
+		}
+
+		wf, ok = e.store.Get(id)
+		if !ok {
+			return false
+		}
+		for i := range wf.Stages {
+			if wf.Stages[i].ID == stageID {
+				wf.Stages[i].Status = StageDone
+				wf.Stages[i].Output = "demo output for " + string(kind)
+			}
+		}
+		_ = e.store.Upsert(wf)
+		return true
+	}
+
+	// Research stage
+	if !step(id+"-research", KindResearch, 4*time.Second) {
+		return
+	}
+
+	// Plan stage
+	if !step(id+"-plan", KindPlan, 3*time.Second) {
+		return
+	}
+
+	// Add 3 implement stages and run them in parallel
+	wf, ok := e.store.Get(id)
+	if !ok {
+		return
+	}
+	implStages := []Stage{
+		{ID: id + "-impl-0", Kind: KindImplement, Status: StagePending, Input: "task 1: refactor auth module"},
+		{ID: id + "-impl-1", Kind: KindImplement, Status: StagePending, Input: "task 2: add rate limiting"},
+		{ID: id + "-impl-2", Kind: KindImplement, Status: StagePending, Input: "task 3: update tests"},
+	}
+	wf.Stages = append(wf.Stages, implStages...)
+	_ = e.store.Upsert(wf)
+
+	var wg sync.WaitGroup
+	durations := []time.Duration{7 * time.Second, 5 * time.Second, 9 * time.Second}
+	for i, s := range implStages {
+		wg.Add(1)
+		go func(stageID string, dur time.Duration) {
+			defer wg.Done()
+			step(stageID, KindImplement, dur)
+		}(s.ID, durations[i])
+	}
+	wg.Wait()
+
+	wf, ok = e.store.Get(id)
+	if !ok {
+		return
+	}
+	allDone := true
+	for _, s := range wf.Stages {
+		if s.Status != StageDone {
+			allDone = false
+		}
+	}
+	if allDone {
+		wf.Status = StatusDone
+	} else {
+		wf.Status = StatusFailed
+	}
+	_ = e.store.Upsert(wf)
+}

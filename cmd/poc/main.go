@@ -46,6 +46,9 @@ var indexHTML []byte
 //go:embed static/profile.html
 var profileHTML []byte
 
+//go:embed static/orchestrator.html
+var orchestratorHTML []byte
+
 // ---- Interfaces for testability ---------------------------------------------
 
 type snapshotter interface {
@@ -1264,6 +1267,11 @@ func registerHandlers(mux *http.ServeMux, mgr *SessionManager, engine *workflow.
 		w.Write(profileHTML)
 	})
 
+	mux.HandleFunc("/orchestrator", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Write(orchestratorHTML)
+	})
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -1447,8 +1455,17 @@ func registerHandlers(mux *http.ServeMux, mgr *SessionManager, engine *workflow.
 	})
 
 	mux.HandleFunc("/api/workflows/", func(w http.ResponseWriter, r *http.Request) {
-		// POST /api/workflows/{id}/resume
 		path := strings.TrimPrefix(r.URL.Path, "/api/workflows/")
+		// GET /api/workflows/ — list all workflows
+		if path == "" && r.Method == http.MethodGet {
+			if engine == nil {
+				writeJSON(w, http.StatusOK, []any{})
+				return
+			}
+			writeJSON(w, http.StatusOK, engine.List())
+			return
+		}
+		// POST /api/workflows/{id}/resume
 		id, action, _ := strings.Cut(path, "/")
 		if r.Method != http.MethodPost || action != "resume" {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -1463,6 +1480,26 @@ func registerHandlers(mux *http.ServeMux, mgr *SessionManager, engine *workflow.
 			return
 		}
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": "resuming", "workflow_id": id})
+	})
+
+	// POST /api/dev/test-workflow — injects a simulated workflow that cycles
+	// through all stages without calling Claude. Safe to use in production for
+	// UI testing; each invocation creates one workflow run.
+	mux.HandleFunc("/api/dev/test-workflow", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if engine == nil {
+			http.Error(w, "workflow engine not available", http.StatusServiceUnavailable)
+			return
+		}
+		id, err := engine.InjectDemoWorkflow(rootCtx)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]string{"workflow_id": id})
 	})
 
 }
