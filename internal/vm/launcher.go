@@ -3,7 +3,8 @@ package vm
 import (
 	"context"
 	"fmt"
-	"log"
+	"io"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -89,7 +90,7 @@ func Launch(ctx context.Context, slot int, rootfsPath string, memMiB int64) (*VM
 	}
 
 	logger := logrus.New()
-	logger.SetLevel(logrus.WarnLevel)
+	logger.SetOutput(io.Discard)
 
 	// Use context.Background() so the FC process is NOT tied to the session or
 	// server context — VMs survive a rubbish-poc restart and are reconnected via
@@ -115,7 +116,7 @@ func Launch(ctx context.Context, slot int, rootfsPath string, memMiB int64) (*VM
 		return nil, fmt.Errorf("start machine: %w", err)
 	}
 
-	log.Printf("[vm slot=%d] boot issued in %s (rootfs=%s)", slot, time.Since(t).Round(time.Millisecond), rootfsPath)
+	slog.Info("vm boot issued", "slot", slot, "duration", time.Since(t).Round(time.Millisecond), "rootfs", rootfsPath)
 
 	return &VM{
 		machine:    m,
@@ -175,7 +176,7 @@ func (v *VM) WaitForSSH(ctx context.Context) error {
 		conn, err := tryDial(addr)
 		if err == nil {
 			conn.Close()
-			log.Printf("[vm slot=%d] ssh ready in %s", v.Slot, time.Since(v.LaunchedAt).Round(time.Millisecond))
+			slog.Info("vm ssh ready", "slot", v.Slot, "duration", time.Since(v.LaunchedAt).Round(time.Millisecond))
 			return nil
 		}
 		select {
@@ -201,7 +202,7 @@ func WaitForVMDead(ip string) {
 		conn.Close()
 		time.Sleep(100 * time.Millisecond)
 	}
-	log.Printf("[vm] warning: %s still reachable 5s after stop — slot reuse may cause session collision", addr)
+	slog.Warn("vm still reachable after stop", "addr", addr)
 }
 
 func (v *VM) Stop(ctx context.Context) error {
