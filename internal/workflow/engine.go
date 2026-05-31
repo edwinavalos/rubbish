@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -12,6 +13,18 @@ import (
 	"sync"
 	"time"
 )
+
+// ErrUsageLimit is returned when an agent session result indicates the Claude
+// API usage limit was reached. The stage is failed but its Input is preserved
+// so Resume() can re-run it once limits reset.
+var ErrUsageLimit = errors.New("usage limit reached")
+
+// isUsageLimitResult reports whether a session result string signals that the
+// Claude API usage limit was hit rather than a real agent output.
+func isUsageLimitResult(result string) bool {
+	return strings.Contains(result, "monthly usage limit") ||
+		strings.Contains(result, "usage limit")
+}
 
 // SessionStarter is the subset of SessionManager the engine needs.
 // The real implementation lives in cmd/poc; Agent E will wire it up.
@@ -323,6 +336,13 @@ func (e *Engine) runStage(ctx context.Context, wfID, stageID string, kind StageK
 		return e.markStageFailed(wfID, stageID, fmt.Errorf("session %s: %w", sessionID, err))
 	}
 
+	// Detect usage-limit responses — the session "succeeds" but the agent never ran.
+	// Fail the stage so Resume() can re-run it once limits reset.
+	if isUsageLimitResult(result) {
+		slog.Warn("workflow: stage hit usage limit", "workflow", wfID[:8], "stage", stageID)
+		return e.markStageFailed(wfID, stageID, fmt.Errorf("%w (session %s)", ErrUsageLimit, sessionID))
+	}
+
 	// --- mark done ---
 	wf, ok = e.store.Get(wfID)
 	if !ok {
@@ -341,8 +361,8 @@ func (e *Engine) runStage(ctx context.Context, wfID, stageID string, kind StageK
 	return nil
 }
 
-// markStageFailed transitions a stage to StageFailed and returns the original
-// error so callers can propagate it.
+// markStageFailed transitions a stage to StageFailed, records the cause in
+// Stage.Error, and returns the original error so callers can propagate it.
 func (e *Engine) markStageFailed(wfID, stageID string, cause error) error {
 	wf, ok := e.store.Get(wfID)
 	if !ok {
@@ -352,6 +372,7 @@ func (e *Engine) markStageFailed(wfID, stageID string, cause error) error {
 	idx := stageIndex(wf, stageID)
 	if idx >= 0 {
 		wf.Stages[idx].Status = StageFailed
+		wf.Stages[idx].Error = cause.Error()
 		e.store.Upsert(wf) //nolint:errcheck
 	}
 	return cause
@@ -367,6 +388,97 @@ func (e *Engine) failWorkflow(id string, cause error) {
 	wf.Status = StatusFailed
 	wf.Error = cause.Error()
 	e.store.Upsert(wf) //nolint:errcheck
+}
+
+// Resume re-runs all StageFailed stages in a workflow that have a saved Input
+// (i.e. the prompt was already generated). It resets them to StagePending,
+// marks the workflow StatusRunning, then fans out in a goroutine — returning
+// immediately so the caller is not blocked.
+//
+// Typical use: after org usage limits reset, call Resume to continue a workflow
+// that was partially completed.
+func (e *Engine) Resume(ctx context.Context, wfID string) error {
+	wf, ok := e.store.Get(wfID)
+	if !ok {
+		return fmt.Errorf("workflow %s not found", wfID)
+	}
+
+	resumable := 0
+	for i := range wf.Stages {
+		if wf.Stages[i].Status == StageFailed && wf.Stages[i].Input != "" {
+			wf.Stages[i].Status = StagePending
+			wf.Stages[i].Error = ""
+			resumable++
+		}
+	}
+	if resumable == 0 {
+		return fmt.Errorf("workflow %s has no resumable (failed+input) stages", wfID)
+	}
+
+	wf.Status = StatusRunning
+	wf.Error = ""
+	if err := e.store.Upsert(wf); err != nil {
+		return fmt.Errorf("persist resume: %w", err)
+	}
+	slog.Info("workflow: resuming", "workflow", wfID[:8], "stages", resumable)
+	go e.resumeRun(e.serverCtx, wfID)
+	return nil
+}
+
+// resumeRun fans out all StagePending stages in the workflow (the ones Reset
+// set to Pending), runs them in parallel, then marks the workflow terminal.
+func (e *Engine) resumeRun(ctx context.Context, wfID string) {
+	wf, ok := e.store.Get(wfID)
+	if !ok {
+		slog.Warn("workflow: resumeRun — not found", "workflow", wfID[:8])
+		return
+	}
+
+	sem := make(chan struct{}, e.maxWorkers)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+
+	for i := range wf.Stages {
+		if wf.Stages[i].Status != StagePending || wf.Stages[i].Input == "" {
+			continue
+		}
+		stageID := wf.Stages[i].ID
+		kind := wf.Stages[i].Kind
+		prompt := wf.Stages[i].Input
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			stageCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+			defer cancel()
+
+			if runErr := e.runStage(stageCtx, wfID, stageID, kind, prompt); runErr != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = runErr
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	wf, ok = e.store.Get(wfID)
+	if !ok {
+		return
+	}
+	if firstErr != nil {
+		wf.Status = StatusFailed
+		wf.Error = firstErr.Error()
+	} else {
+		wf.Status = StatusDone
+	}
+	e.store.Upsert(wf) //nolint:errcheck
+	slog.Info("workflow: resume finished", "workflow", wfID[:8], "status", wf.Status)
 }
 
 // stageIndex returns the index of the stage with the given ID, or -1.

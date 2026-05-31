@@ -92,6 +92,7 @@ type WorkflowHandler interface {
 	Submit(ctx context.Context, input, repoURL, branch string) (string, error) // returns workflow ID
 	Get(id string) (any, bool)                                                 // returns *workflow.Workflow
 	List() []any                                                               // returns []*workflow.Workflow
+	Resume(ctx context.Context, id string) error                               // re-runs failed stages
 }
 
 // SessionHandler is implemented by SessionManager (wired in later).
@@ -182,6 +183,30 @@ func registerTools(s *Server) {
 				slim = append(slim, m)
 			}
 			return marshalAny(slim)
+		},
+	})
+
+	s.register(Tool{
+		Name: "resume_workflow",
+		Description: "Re-run all failed stages of a workflow, reusing the existing research and plan outputs. " +
+			"Use this after Claude API usage limits reset to continue a partially-completed workflow. " +
+			"Returns an error if the workflow has no resumable (failed + saved input) stages.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"workflow_id": map[string]any{"type": "string", "description": "Workflow ID to resume"},
+			},
+			"required": []string{"workflow_id"},
+		},
+		Handler: func(ctx context.Context, args map[string]any) (string, error) {
+			if s.wh == nil {
+				return "not implemented", nil
+			}
+			id, _ := args["workflow_id"].(string)
+			if err := s.wh.Resume(ctx, id); err != nil {
+				return "", fmt.Errorf("resume_workflow: %w", err)
+			}
+			return marshalAny(map[string]string{"status": "resuming", "workflow_id": id})
 		},
 	})
 

@@ -37,6 +37,7 @@ type Stage struct {
 	Status    StageStatus
 	Input     string      // prompt fed to this stage
 	Output    string      // captured stdout, available when StageDone
+	Error     string      // set when Status == StageFailed; reason for failure
 }
 
 type Workflow struct {

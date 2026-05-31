@@ -1146,7 +1146,7 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
-func registerHandlers(mux *http.ServeMux, mgr *SessionManager, rootCtx context.Context) {
+func registerHandlers(mux *http.ServeMux, mgr *SessionManager, engine *workflow.Engine, rootCtx context.Context) {
 	mux.HandleFunc("/api/saved-token", func(w http.ResponseWriter, r *http.Request) {
 		has := loadSavedToken(mgr.credPath) != ""
 		writeJSON(w, http.StatusOK, map[string]bool{"has_token": has})
@@ -1381,6 +1381,25 @@ func registerHandlers(mux *http.ServeMux, mgr *SessionManager, rootCtx context.C
 		w.WriteHeader(http.StatusNoContent)
 	})
 
+	mux.HandleFunc("/api/workflows/", func(w http.ResponseWriter, r *http.Request) {
+		// POST /api/workflows/{id}/resume
+		path := strings.TrimPrefix(r.URL.Path, "/api/workflows/")
+		id, action, _ := strings.Cut(path, "/")
+		if r.Method != http.MethodPost || action != "resume" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if engine == nil {
+			http.Error(w, "workflow engine not available", http.StatusServiceUnavailable)
+			return
+		}
+		if err := engine.Resume(rootCtx, id); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "resuming", "workflow_id": id})
+	})
+
 }
 
 // ---- main -------------------------------------------------------------------
@@ -1444,7 +1463,7 @@ func main() {
 	engine.RecoverInProgress(ctx) //nolint:errcheck
 
 	mux := http.NewServeMux()
-	registerHandlers(mux, mgr, ctx)
+	registerHandlers(mux, mgr, engine, ctx)
 
 	mcpServer := mcp.NewServer(engine, mgr)
 	mux.Handle("/mcp", mcpServer)
