@@ -6,6 +6,86 @@ import (
 	"fmt"
 )
 
+// ---- slim projection helpers -------------------------------------------------
+// The MCP handler receives workflow/session values as `any` to avoid import
+// cycles. We marshal→map→project→re-marshal to strip large text bodies before
+// returning responses to the LLM.
+
+// projectWorkflow projects a workflow value into a map with stage Input/Output removed.
+// If includeOutput is true, stage Output is kept. Returns the map for further composition.
+func projectWorkflow(wf any, includeOutput bool) (map[string]any, error) {
+	b, err := json.Marshal(wf)
+	if err != nil {
+		return nil, fmt.Errorf("marshal workflow: %w", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, fmt.Errorf("unmarshal workflow: %w", err)
+	}
+	if stages, ok := m["Stages"].([]any); ok {
+		for _, s := range stages {
+			if sm, ok := s.(map[string]any); ok {
+				delete(sm, "Input")
+				if !includeOutput {
+					delete(sm, "Output")
+				}
+			}
+		}
+	}
+	return m, nil
+}
+
+// slimWorkflow marshals the projected workflow to a JSON string.
+func slimWorkflow(wf any, includeOutput bool) (string, error) {
+	m, err := projectWorkflow(wf, includeOutput)
+	if err != nil {
+		return fmt.Sprintf("error: %v", err), nil
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return fmt.Sprintf("marshal error: %v", err), nil
+	}
+	return string(out), nil
+}
+
+// slimSession returns a map with Prompt and Result removed.
+// If includeResult is true, Result is kept but truncated to maxResultBytes.
+// A ResultBytesFull field is added when truncation occurs.
+func slimSession(sess any, includeResult bool, maxResultBytes int) (string, error) {
+	b, err := json.Marshal(sess)
+	if err != nil {
+		return fmt.Sprintf("marshal error: %v", err), nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		return string(b), nil
+	}
+	delete(m, "Prompt")
+	if includeResult {
+		if result, ok := m["Result"].(string); ok && len(result) > maxResultBytes {
+			m["Result"] = result[:maxResultBytes]
+			m["ResultBytesFull"] = len(result)
+			m["ResultTruncated"] = true
+		}
+	} else {
+		if result, ok := m["Result"].(string); ok && len(result) > 0 {
+			m["ResultBytesFull"] = len(result)
+		}
+		delete(m, "Result")
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return fmt.Sprintf("marshal error: %v", err), nil
+	}
+	return string(out), nil
+}
+
+// isActiveSession returns true for sessions that are not in a terminal state.
+func isActiveSession(m map[string]any) bool {
+	status, _ := m["Status"].(string)
+	return status != "stopped" && status != "failed"
+}
+
 // WorkflowHandler is implemented by workflow.Engine (wired in later).
 // any is used in place of *workflow.Workflow to avoid import cycles.
 type WorkflowHandler interface {
@@ -55,12 +135,15 @@ func registerTools(s *Server) {
 	})
 
 	s.register(Tool{
-		Name:        "get_workflow",
-		Description: "Get the status and stages of a workflow run.",
+		Name: "get_workflow",
+		Description: "Get the status and stages of a workflow run. " +
+			"By default stage prompts and agent outputs are omitted to keep the response small — " +
+			"set include_output=true to include full stage Output text (can be very large).",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"workflow_id": map[string]any{"type": "string", "description": "Workflow ID returned by submit_workflow"},
+				"workflow_id":    map[string]any{"type": "string", "description": "Workflow ID returned by submit_workflow"},
+				"include_output": map[string]any{"type": "boolean", "description": "Include full stage Output text (default false)"},
 			},
 			"required": []string{"workflow_id"},
 		},
@@ -69,17 +152,18 @@ func registerTools(s *Server) {
 				return "not implemented", nil
 			}
 			id, _ := args["workflow_id"].(string)
+			includeOutput, _ := args["include_output"].(bool)
 			wf, ok := s.wh.Get(id)
 			if !ok {
 				return "not found", nil
 			}
-			return marshalAny(wf)
+			return slimWorkflow(wf, includeOutput)
 		},
 	})
 
 	s.register(Tool{
 		Name:        "list_workflows",
-		Description: "List all workflow runs.",
+		Description: "List all workflow runs. Stage prompts and outputs are omitted; use get_workflow for full stage detail.",
 		InputSchema: map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},
@@ -88,7 +172,16 @@ func registerTools(s *Server) {
 			if s.wh == nil {
 				return "not implemented", nil
 			}
-			return marshalAny(s.wh.List())
+			wfs := s.wh.List()
+			slim := make([]map[string]any, 0, len(wfs))
+			for _, wf := range wfs {
+				m, err := projectWorkflow(wf, false)
+				if err != nil {
+					continue
+				}
+				slim = append(slim, m)
+			}
+			return marshalAny(slim)
 		},
 	})
 
@@ -124,12 +217,16 @@ func registerTools(s *Server) {
 	})
 
 	s.register(Tool{
-		Name:        "get_session",
-		Description: "Get the status and result of a session.",
+		Name: "get_session",
+		Description: "Get the status and result of a session. " +
+			"Result is truncated to 4000 characters by default; check ResultBytesFull for total size. " +
+			"Set include_full_result=true to get the complete result (may be very large). " +
+			"Prompt is always omitted.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"session_id": map[string]any{"type": "string", "description": "Session ID returned by create_session"},
+				"session_id":          map[string]any{"type": "string", "description": "Session ID returned by create_session"},
+				"include_full_result": map[string]any{"type": "boolean", "description": "Return full Result text (default false, truncates at 4000 chars)"},
 			},
 			"required": []string{"session_id"},
 		},
@@ -138,30 +235,61 @@ func registerTools(s *Server) {
 				return "not implemented", nil
 			}
 			id, _ := args["session_id"].(string)
+			includeFullResult, _ := args["include_full_result"].(bool)
 			sess, ok := s.sh.GetSession(id)
 			if !ok {
 				return "not found", nil
 			}
-			return marshalAny(sess)
+			return slimSession(sess, true, func() int {
+				if includeFullResult {
+					return 1<<31 - 1
+				}
+				return 4000
+			}())
 		},
 	})
 
 	s.register(Tool{
-		Name:        "list_sessions",
-		Description: "List all sessions.",
+		Name: "list_sessions",
+		Description: "List sessions. By default returns only active sessions (booting, configuring, ready). " +
+			"Set status=\"all\" to include stopped and failed sessions. " +
+			"Prompt and Result are always omitted; use get_session for those fields.",
 		InputSchema: map[string]any{
-			"type":       "object",
-			"properties": map[string]any{},
+			"type": "object",
+			"properties": map[string]any{
+				"status": map[string]any{"type": "string", "description": "Filter: \"active\" (default) returns non-terminal sessions only; \"all\" returns every session"},
+			},
 		},
 		Handler: func(ctx context.Context, args map[string]any) (string, error) {
 			if s.sh == nil {
 				return "not implemented", nil
 			}
+			statusFilter, _ := args["status"].(string)
+			showAll := statusFilter == "all"
+
 			sessions, err := s.sh.ListSessions()
 			if err != nil {
 				return "", fmt.Errorf("list_sessions: %w", err)
 			}
-			return marshalAny(sessions)
+
+			slim := make([]map[string]any, 0, len(sessions))
+			for _, sess := range sessions {
+				b, err := json.Marshal(sess)
+				if err != nil {
+					continue
+				}
+				var m map[string]any
+				if err := json.Unmarshal(b, &m); err != nil {
+					continue
+				}
+				if !showAll && !isActiveSession(m) {
+					continue
+				}
+				delete(m, "Prompt")
+				delete(m, "Result")
+				slim = append(slim, m)
+			}
+			return marshalAny(slim)
 		},
 	})
 
