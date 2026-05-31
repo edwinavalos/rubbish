@@ -113,7 +113,7 @@ func (e *Engine) Submit(ctx context.Context, input, repoURL, branch string) (str
 // run is the pipeline goroutine that drives a workflow forward stage by stage.
 func (e *Engine) run(ctx context.Context, id string) {
 	// ----- research stage -----
-	researchOutput, err := e.executeNamedStage(ctx, id, KindResearch, 20*time.Minute, func(wf *Workflow) string {
+	researchOutput, err := e.executeNamedStage(ctx, id, KindResearch, 60*time.Minute, func(wf *Workflow) string {
 		return "You are a research agent. Investigate the following goal and provide structured findings that will be used by a planning agent.\n\n" +
 			"Goal: " + wf.Input + "\n\n" +
 			"Repository: " + wf.RepoURL + " (branch: " + wf.Branch + ")\n\n" +
@@ -125,7 +125,7 @@ func (e *Engine) run(ctx context.Context, id string) {
 	}
 
 	// ----- plan stage -----
-	planOutput, err := e.executeNamedStage(ctx, id, KindPlan, 10*time.Minute, func(wf *Workflow) string {
+	planOutput, err := e.executeNamedStage(ctx, id, KindPlan, 20*time.Minute, func(wf *Workflow) string {
 		return "You are a planning agent. Based on the research findings below, create a concrete implementation plan.\n\n" +
 			"Goal: " + wf.Input + "\n\n" +
 			"Research findings:\n" + researchOutput + "\n\n" +
@@ -460,7 +460,7 @@ func (e *Engine) resumeRun(ctx context.Context, wfID string) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			stageCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+			stageCtx, cancel := context.WithTimeout(ctx, 45*time.Minute)
 			defer cancel()
 
 			if runErr := e.runStage(stageCtx, wfID, stageID, kind, prompt); runErr != nil {
