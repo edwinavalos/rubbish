@@ -37,12 +37,17 @@ functional:
 | SSH ready in VM (~1.1s) | ✅ working |
 | WebSocket → SSH → PTY bridge (~69ms setup) | ✅ working |
 | xterm.js browser terminal | ✅ working |
-| Claude Code 2.1.119 authenticated and running in VM | ✅ working |
+| Claude Code authenticated and running in VM | ✅ working |
 | Per-session dm-thin CoW rootfs snapshots | ✅ working |
 | NFS-mounted persistent `~/.claude/` (memory, projects) | ✅ working |
 | Git bare-repo cache + in-VM clone | ✅ working |
 | Session persistence across restarts (SQLite store) | ✅ working |
 | 4 concurrent sessions with slot management | ✅ working |
+| MCP JSON-RPC 2.0 server for orchestrating agents | ✅ working |
+| Non-interactive agent sessions (research / plan / implement roles) | ✅ working |
+| 3-stage workflow engine (research → plan → parallel implement) | ✅ working |
+| Usage-limit detection and workflow resume | ✅ working |
+| Orchestrator UI (pipeline visualization, pagination, history) | ✅ working |
 | virtiofs workspace share | ❌ stub only — Firecracker rejected virtiofs (PR #1351) |
 | Running as non-root | ❌ udev resets dm-thin device ownership; under investigation |
 | gRPC control plane daemon (`rubishd`) | 🔲 designed, not wired |
@@ -98,14 +103,17 @@ the browser auto-reconnects silently.
 |---|---|---|
 | `internal/vm` | `launcher.go`, `cleanup.go`, `detached.go`, `snapshot.go` | Firecracker VM launch, TAP device creation, network config injection, cleanup |
 | `internal/compute/firecracker` | `snapshot.go` | dm-thin pool management: create/delete per-session CoW snapshots |
-| `internal/terminal` | `bridge.go` | WebSocket → SSH → PTY bridge |
+| `internal/terminal` | `bridge.go` | WebSocket → SSH → PTY bridge; `RunCapture` for separate stdout/stderr capture |
 | `internal/session` | `statemachine.go` | Session state machine (creating → ready → stopped → …) |
 | `internal/sessionstore` | `store.go` | SQLite-backed session and favorites persistence |
 | `internal/gitutil` | `gitutil.go`, `repocache.go` | Repo name parsing, host-side bare-repo cache for fast in-VM clones |
+| `internal/profile` | `store.go` | Claude OAuth and GitHub token persistence |
+| `internal/workflow` | `engine.go`, `run.go`, `store.go` | 3-stage pipeline engine (research → plan → parallel implement), usage-limit detection, workflow resume |
+| `internal/mcp` | `server.go`, `tools.go` | JSON-RPC 2.0 MCP server exposing workflow and session tools to orchestrating agents |
 
 ### Planned control plane
 
-See [docs/design-control-plane.md](docs/design-control-plane.md) for the full
+See [scripts/design-control-plane.md](scripts/design-control-plane.md) for the full
 design. The `rubishd` daemon will expose:
 
 ```
@@ -222,12 +230,13 @@ the read-only base volume `rubbish-base-ro`.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/` | xterm.js session UI (embedded HTML) |
+| `GET` | `/` | Session management UI |
+| `GET` | `/orchestrator` | Workflow orchestrator UI (pipeline visualization) |
 | `GET` | `/profile` | Profile management UI |
 | `GET` | `/api/saved-token` | Check whether a Claude OAuth token is saved |
 | `GET` | `/api/profile` | Return masked Claude OAuth and GitHub tokens |
 | `PUT` | `/api/profile` | Update Claude OAuth and/or GitHub tokens |
-| `GET` | `/api/sessions` | List all active sessions |
+| `GET` | `/api/sessions` | List sessions |
 | `POST` | `/api/sessions` | Create a session (boots a VM) |
 | `DELETE` | `/api/sessions/{id}` | Stop and destroy a session |
 | `POST` | `/api/sessions/{id}/start` | Restart a stopped session |
@@ -235,6 +244,10 @@ the read-only base volume `rubbish-base-ro`.
 | `GET` | `/api/favorites` | List favorites |
 | `POST` | `/api/favorites` | Create a favorite |
 | `DELETE` | `/api/favorites/{id}` | Delete a favorite |
+| `GET` | `/api/workflows/` | List all workflows (sorted newest-first) |
+| `POST` | `/api/workflows/{id}/resume` | Resume a failed workflow from its failed stages |
+| `POST` | `/api/dev/test-workflow` | Inject a simulated demo workflow (no Claude usage) |
+| `POST` | `/mcp` | MCP JSON-RPC 2.0 endpoint for agent orchestration |
 
 **POST /api/sessions body:**
 
@@ -345,21 +358,21 @@ tail -f /var/log/rubbish-terminal.log  # rubbish-terminal
 - [x] Multi-session slot management (4 slots)
 
 ### Phase 2 — Shared workspace storage
-See [docs/design-shared-workspace.md](docs/design-shared-workspace.md).
+See [scripts/design-shared-workspace.md](scripts/design-shared-workspace.md).
 
 - [ ] `/<team>/<user>/` workspace layout with NFS exports
 - [ ] `WorkspaceManager`: repo clone, worktree create/prune, serialised fetch
 - [ ] `RetentionReaper`: 30-day expiry from last VM shutdown
 
 ### Phase 3 — Ephemeral per-session rootfs
-See [docs/design-ephemeral-rootfs.md](docs/design-ephemeral-rootfs.md).
+See [scripts/design-ephemeral-rootfs.md](scripts/design-ephemeral-rootfs.md).
 
 - [x] dm-thin thin pool + per-session CoW snapshots
 - [ ] Pool utilisation monitoring; refuse launches above 80%
 - [ ] Base image update without affecting running sessions
 
 ### Phase 4 — Control plane daemon
-See [docs/design-control-plane.md](docs/design-control-plane.md).
+See [scripts/design-control-plane.md](scripts/design-control-plane.md).
 
 - [ ] `rubishd` entry point; replaces `rubbish-poc`
 - [ ] gRPC services wired up (Auth, Session, Workspace, Compute, Image)
@@ -377,21 +390,22 @@ See [docs/design-control-plane.md](docs/design-control-plane.md).
 
 ```
 cmd/
-  poc/           — PoC orchestrator binary (session lifecycle + REST API)
+  poc/           — PoC orchestrator binary (session lifecycle, REST API, workflow engine, MCP server)
   terminal/      — Standalone WebSocket terminal proxy
   rubishd/       — Control plane daemon entry point (not yet wired)
 internal/
   compute/firecracker/   — dm-thin snapshot manager
   gitutil/               — bare-repo cache, repo cloning helpers
+  mcp/                   — MCP JSON-RPC 2.0 server (agent orchestration tools)
   profile/               — Claude OAuth / GitHub token store
   session/               — session state machine
   sessionstore/          — SQLite session + favorites store
   terminal/              — WebSocket → SSH → PTY bridge
   vm/                    — Firecracker VM launcher + cleanup
+  workflow/              — 3-stage pipeline engine; usage-limit detection; resume
 proto/                   — gRPC service definitions (future control plane)
 gen/                     — generated protobuf Go code
-docs/                    — design documents (workspace, rootfs, control plane)
-scripts/                 — host setup, rootfs build, networking, storage, systemd units
+scripts/                 — host setup, rootfs build, networking, storage, systemd units, design docs
 PROJECT.md               — vision and full roadmap detail
 CHECKPOINT.md            — agent handoff context (current state, known bugs)
 RESEARCH_NOTES.md        — debugging findings
@@ -404,4 +418,4 @@ RESEARCH_NOTES.md        — debugging findings
 - [`github.com/firecracker-microvm/firecracker-go-sdk`](https://github.com/firecracker-microvm/firecracker-go-sdk) — Firecracker VM management
 - [`github.com/gorilla/websocket`](https://github.com/gorilla/websocket) — WebSocket server
 - `golang.org/x/crypto/ssh` — SSH client for VM bridge
-- [`github.com/sirupsen/logrus`](https://github.com/sirupsen/logrus) — structured logging
+- `log/slog` (stdlib) — structured logging throughout; `logrus` is kept as a transitive dependency of `firecracker-go-sdk` but is silenced with `io.Discard`
