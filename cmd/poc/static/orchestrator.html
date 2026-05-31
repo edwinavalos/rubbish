@@ -272,6 +272,28 @@
     }
     .btn-resume:hover { background: var(--c-running); color: #000; }
 
+    /* ── Pagination ── */
+    .pagination {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 20px 0 4px;
+    }
+    .btn-page {
+      background: transparent;
+      border: 1px solid var(--border-strong);
+      color: var(--text-dim);
+      padding: 4px 12px;
+      border-radius: 3px;
+      font-family: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .btn-page:hover:not(:disabled) { color: var(--text-muted); border-color: var(--text-dimmer); }
+    .btn-page:disabled { opacity: 0.3; cursor: default; }
+    .page-info { font-size: 11px; color: var(--text-dim); min-width: 100px; text-align: center; }
+
     /* ── Empty ── */
     .empty-state {
       color: var(--text-empty);
@@ -300,13 +322,14 @@
 <main>
   <div class="toolbar">
     <div class="section-title" id="sectionTitle">Workflows</div>
-    <div class="filter-group">
-      <button class="filter-btn active" data-filter="active" id="fActive">active</button>
-      <button class="filter-btn" data-filter="all" id="fAll">all</button>
-    </div>
   </div>
   <div class="wf-list" id="wfList">
     <div class="empty-state">No workflows yet.<br>Submit one via MCP or click "run demo workflow".</div>
+  </div>
+  <div class="pagination" id="pagination" style="display:none">
+    <button class="btn-page" id="btnPrev">← prev</button>
+    <span class="page-info" id="pageInfo"></span>
+    <button class="btn-page" id="btnNext">next →</button>
   </div>
 </main>
 
@@ -315,9 +338,10 @@
 
   // ── State ──────────────────────────────────────────────────────────────────
 
-  let filter = 'active'; // 'active' | 'all'
-  let expandedIDs = new Set();
-  let workflows = [];
+  const PAGE_SIZE   = 10;
+  let currentPage   = 1;   // 1-based
+  let expandedIDs   = new Set();
+  let workflows     = [];  // full sorted list from server
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -341,36 +365,56 @@
     return s.length > n ? s.slice(0, n) + '…' : s;
   }
 
+  function escHtml(s) {
+    return String(s)
+      .replace(/&/g,'&amp;')
+      .replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;');
+  }
+
   // ── Fetch & Render ─────────────────────────────────────────────────────────
 
   async function loadWorkflows() {
     try {
-      const res = await fetch('/api/workflows');
+      const res = await fetch('/api/workflows/');
       if (!res.ok) return;
       workflows = await res.json() || [];
+      // server already sorts newest-first; clamp page if total shrank
+      const totalPages = Math.max(1, Math.ceil(workflows.length / PAGE_SIZE));
+      if (currentPage > totalPages) currentPage = totalPages;
       render();
     } catch (e) { /* network, retry */ }
   }
 
   function render() {
     const ACTIVE = new Set(['queued', 'running']);
-    const list = filter === 'active'
-      ? workflows.filter(w => ACTIVE.has(w.Status))
-      : workflows;
-
     const activeCount = workflows.filter(w => ACTIVE.has(w.Status)).length;
-    $('sectionTitle').textContent = activeCount
-      ? `Workflows (${activeCount} active)`
-      : 'Workflows';
+    const total = workflows.length;
 
-    if (list.length === 0) {
-      $('wfList').innerHTML = filter === 'active'
-        ? '<div class="empty-state">No active workflows.<br>Submit one via MCP or click "run demo workflow".</div>'
-        : '<div class="empty-state">No workflows yet.</div>';
+    // Header title
+    $('sectionTitle').textContent = activeCount
+      ? `Workflows — ${activeCount} active, ${total} total`
+      : `Workflows — ${total} total`;
+
+    if (total === 0) {
+      $('wfList').innerHTML = '<div class="empty-state">No workflows yet.<br>Submit one via MCP or click "run demo workflow".</div>';
+      $('pagination').style.display = 'none';
       return;
     }
 
-    $('wfList').innerHTML = list.map(renderWorkflow).join('');
+    // Paginate
+    const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    const start = (currentPage - 1) * PAGE_SIZE;
+    const page  = workflows.slice(start, start + PAGE_SIZE);
+
+    $('wfList').innerHTML = page.map(renderWorkflow).join('');
+
+    // Pagination controls
+    $('pagination').style.display = totalPages > 1 ? 'flex' : 'none';
+    $('pageInfo').textContent = `page ${currentPage} of ${totalPages}`;
+    $('btnPrev').disabled = currentPage <= 1;
+    $('btnNext').disabled = currentPage >= totalPages;
   }
 
   function renderWorkflow(wf) {
@@ -380,7 +424,6 @@
     const repo = repoShort(wf.RepoURL);
     const stages = wf.Stages || [];
 
-    // split stages by kind
     const research = stages.find(s => s.Kind === 'research');
     const plan     = stages.find(s => s.Kind === 'plan');
     const impls    = stages.filter(s => s.Kind === 'implement');
@@ -421,67 +464,48 @@
 
   function buildPipeline(research, plan, impls) {
     const parts = [];
-
-    if (research) {
-      parts.push(stageNode(research));
-    }
+    if (research) parts.push(stageNode(research));
     if (plan) {
       if (parts.length) parts.push('<span class="pipeline-arrow">→</span>');
       parts.push(stageNode(plan));
     }
-
     if (impls.length > 0) {
       if (parts.length) parts.push('<span class="pipeline-arrow">→</span>');
-      const implNodes = impls.map(s => stageNode(s)).join('');
-      parts.push(`<div class="impl-group">${implNodes}</div>`);
+      parts.push(`<div class="impl-group">${impls.map(stageNode).join('')}</div>`);
     }
-
     if (parts.length === 0) {
       return '<div style="color:var(--text-dimmer);font-size:11px;padding-top:10px;">No stages yet.</div>';
     }
-
     return `<div class="pipeline-row">${parts.join('')}</div>`;
   }
 
   function stageNode(s) {
     const status = (s.Status || 'pending').toLowerCase();
-    const label  = s.Kind || 'stage';
     const sessShort = s.SessionID ? s.SessionID.slice(0, 8) : '';
     return `
       <div class="stage-node">
         <div class="stage-pill ${status}">
           <span class="stage-dot"></span>
-          ${escHtml(label)}
+          ${escHtml(s.Kind || 'stage')}
         </div>
-        ${sessShort ? `<span class="stage-session">${sessShort}</span>` : '<span class="stage-session">—</span>'}
+        <span class="stage-session">${sessShort || '—'}</span>
       </div>`;
-  }
-
-  function escHtml(s) {
-    return String(s)
-      .replace(/&/g,'&amp;')
-      .replace(/</g,'&lt;')
-      .replace(/>/g,'&gt;')
-      .replace(/"/g,'&quot;');
   }
 
   // ── Interactions ───────────────────────────────────────────────────────────
 
   function toggleExpand(id) {
-    if (expandedIDs.has(id)) {
-      expandedIDs.delete(id);
-    } else {
-      expandedIDs.add(id);
-    }
+    expandedIDs.has(id) ? expandedIDs.delete(id) : expandedIDs.add(id);
     render();
   }
 
   async function resumeWorkflow(id) {
-    try {
-      await fetch(`/api/workflows/${id}/resume`, { method: 'POST' });
-    } catch (e) { /* ignore */ }
+    try { await fetch(`/api/workflows/${id}/resume`, { method: 'POST' }); } catch (e) { /* ignore */ }
     setTimeout(loadWorkflows, 300);
   }
+
+  $('btnPrev').addEventListener('click', () => { currentPage--; render(); window.scrollTo(0,0); });
+  $('btnNext').addEventListener('click', () => { currentPage++; render(); window.scrollTo(0,0); });
 
   $('btnDemo').addEventListener('click', async () => {
     const btn = $('btnDemo');
@@ -491,8 +515,8 @@
       const res = await fetch('/api/dev/test-workflow', { method: 'POST' });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
-      // expand the new workflow
       expandedIDs.add(data.workflow_id);
+      currentPage = 1; // jump to page 1 so the new workflow is visible
       await loadWorkflows();
     } catch (e) {
       alert('Failed to start demo: ' + e.message);
@@ -500,16 +524,6 @@
       btn.disabled = false;
       btn.textContent = '▶ run demo workflow';
     }
-  });
-
-  // filter buttons
-  document.querySelectorAll('.filter-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      filter = btn.dataset.filter;
-      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      render();
-    });
   });
 
   // ── Init ───────────────────────────────────────────────────────────────────
