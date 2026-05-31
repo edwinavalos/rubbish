@@ -93,6 +93,9 @@
     }
     .btn-new:hover { background: var(--accent-hover); }
 
+    .nav-link { color: var(--text-muted); text-decoration: none; font-size: 12px; }
+    .nav-link:hover { color: var(--text-secondary); }
+
     /* ── Body layout ── */
     .body-layout {
       display: flex;
@@ -505,9 +508,9 @@
 
 <header>
   <span class="logo">rubbish</span>
-  <nav style="margin-left:16px;display:flex;gap:16px;">
-    <a href="/orchestrator" style="color:var(--text-muted);text-decoration:none;font-size:12px;">orchestrator</a>
-    <a href="/profile" style="color:var(--text-muted);text-decoration:none;font-size:12px;">profile</a>
+  <nav style="display:flex;gap:16px;margin-left:16px;">
+    <a href="/orchestrator" class="nav-link">orchestrator</a>
+    <a href="/profile" class="nav-link">profile</a>
   </nav>
   <button class="btn-new" id="btnNew">+ New Session</button>
 </header>

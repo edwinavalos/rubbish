@@ -7,43 +7,58 @@
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    /* ── Color tokens (dark default) ── */
     :root {
-      --bg:             #0f0f0f;
-      --surface:        #111111;
-      --border:         #1e1e1e;
-      --border-strong:  #2a2a2a;
-      --text-primary:   #e0e0e0;
-      --text-secondary: #d1d5db;
-      --text-muted:     #9ca3af;
-      --text-dim:       #6b7280;
-      --text-dimmer:    #4b5563;
-      --text-empty:     #333333;
-      --text-heading:   #f3f4f6;
-      --accent:         #7c3aed;
-      --accent-hover:   #6d28d9;
-      --c-pending:      #4b5563;
-      --c-running:      #facc15;
-      --c-done:         #22c55e;
-      --c-failed:       #ef4444;
+      --bg:              #0f0f0f;
+      --surface:         #111111;
+      --surface-input:   #0f0f0f;
+      --border:          #1e1e1e;
+      --border-strong:   #2a2a2a;
+      --text-primary:    #e0e0e0;
+      --text-secondary:  #d1d5db;
+      --text-muted:      #9ca3af;
+      --text-dim:        #6b7280;
+      --text-dimmer:     #4b5563;
+      --text-placeholder:#374151;
+      --text-empty:      #333333;
+      --text-heading:    #f3f4f6;
+      --modal-backdrop:  rgba(0,0,0,0.72);
+      --accent:          #7c3aed;
+      --accent-hover:    #6d28d9;
+      --status-ready:    #22c55e;
+      --status-starting: #facc15;
+      --status-failed:   #ef4444;
+      --c-pending:       #4b5563;
+      --c-running:       #facc15;
+      --c-done:          #22c55e;
+      --c-failed:        #ef4444;
     }
 
     @media (prefers-color-scheme: light) {
       :root {
-        --bg:             #f3f4f6;
-        --surface:        #ffffff;
-        --border:         #e5e7eb;
-        --border-strong:  #d1d5db;
-        --text-primary:   #111827;
-        --text-secondary: #374151;
-        --text-muted:     #6b7280;
-        --text-dim:       #9ca3af;
-        --text-dimmer:    #9ca3af;
-        --text-empty:     #d1d5db;
-        --text-heading:   #111827;
-        --c-pending:      #9ca3af;
-        --c-running:      #d97706;
-        --c-done:         #16a34a;
-        --c-failed:       #dc2626;
+        --bg:              #f3f4f6;
+        --surface:         #ffffff;
+        --surface-input:   #f9fafb;
+        --border:          #e5e7eb;
+        --border-strong:   #d1d5db;
+        --text-primary:    #111827;
+        --text-secondary:  #374151;
+        --text-muted:      #6b7280;
+        --text-dim:        #9ca3af;
+        --text-dimmer:     #9ca3af;
+        --text-placeholder:#d1d5db;
+        --text-empty:      #d1d5db;
+        --text-heading:    #111827;
+        --modal-backdrop:  rgba(0,0,0,0.45);
+        --accent:          #7c3aed;
+        --accent-hover:    #6d28d9;
+        --status-ready:    #16a34a;
+        --status-starting: #d97706;
+        --status-failed:   #dc2626;
+        --c-pending:       #9ca3af;
+        --c-running:       #d97706;
+        --c-done:          #16a34a;
+        --c-failed:        #dc2626;
       }
     }
 
@@ -60,18 +75,19 @@
     header {
       display: flex;
       align-items: center;
-      gap: 20px;
+      justify-content: space-between;
       padding: 0 24px;
       height: 52px;
       border-bottom: 1px solid var(--border);
       background: var(--surface);
       flex-shrink: 0;
     }
+    .header-left { display: flex; align-items: center; gap: 16px; }
     .logo { font-size: 18px; font-weight: 700; color: var(--accent); letter-spacing: -0.5px; text-decoration: none; }
-    nav { display: flex; gap: 16px; margin-left: 4px; }
-    nav a { color: var(--text-dim); text-decoration: none; font-size: 12px; padding: 3px 0; border-bottom: 2px solid transparent; }
-    nav a:hover { color: var(--text-muted); }
-    nav a.active { color: var(--text-secondary); border-bottom-color: var(--accent); }
+    nav { display: flex; gap: 16px; }
+    nav a { color: var(--text-muted); text-decoration: none; font-size: 12px; }
+    nav a:hover { color: var(--text-secondary); }
+    nav a.active { color: var(--text-secondary); }
 
     .header-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
     .btn-demo {
@@ -307,12 +323,14 @@
 <body>
 
 <header>
-  <a class="logo" href="/">rubbish</a>
-  <nav>
-    <a href="/">sessions</a>
-    <a href="/orchestrator" class="active">orchestrator</a>
-    <a href="/profile">profile</a>
-  </nav>
+  <div class="header-left">
+    <a class="logo" href="/">rubbish</a>
+    <nav>
+      <a href="/">sessions</a>
+      <a href="/orchestrator" class="active">orchestrator</a>
+      <a href="/profile">profile</a>
+    </nav>
+  </div>
   <div class="header-right">
     <div class="poll-dot" title="live polling"></div>
     <button class="btn-demo" id="btnDemo">▶ run demo workflow</button>
