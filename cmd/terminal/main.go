@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -71,21 +71,21 @@ func main() {
 	flag.Parse()
 
 	if *keyPath == "" {
-		log.Fatal("usage: rubbish-terminal --key <path-to-ssh-private-key>")
+		slog.Error("usage: rubbish-terminal --key <path-to-ssh-private-key>"); os.Exit(1)
 	}
 
 	keyBytes, err := os.ReadFile(*keyPath)
 	if err != nil {
-		log.Fatalf("read SSH key: %v", err)
+		slog.Error("read SSH key", "err", err); os.Exit(1)
 	}
 	signer, err := ssh.ParsePrivateKey(keyBytes)
 	if err != nil {
-		log.Fatalf("parse SSH key: %v", err)
+		slog.Error("parse SSH key", "err", err); os.Exit(1)
 	}
 
 	store, err := sessionstore.Open(*dbPath)
 	if err != nil {
-		log.Fatalf("open session DB: %v", err)
+		slog.Error("open session DB", "err", err); os.Exit(1)
 	}
 	defer store.Close()
 
@@ -134,7 +134,7 @@ func main() {
 		ch := make(chan os.Signal, 1)
 		signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
 		<-ch
-		log.Printf("shutdown signal — notifying active terminals to reconnect")
+		slog.Info("shutdown signal, notifying active terminals to reconnect")
 		hub.notifyReconnect()
 		// Brief pause so the WebSocket messages are flushed before we stop
 		// accepting connections. The browser will retry during this window.
@@ -144,9 +144,9 @@ func main() {
 		srv.Shutdown(ctx) //nolint:errcheck
 	}()
 
-	log.Printf("rubbish-terminal listening on %s", *addr)
+	slog.Info("rubbish-terminal listening", "addr", *addr)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("listen: %v", err)
+		slog.Error("listen", "err", err); os.Exit(1)
 	}
 }
 

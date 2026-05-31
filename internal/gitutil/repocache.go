@@ -2,7 +2,7 @@ package gitutil
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -103,7 +103,7 @@ func (c *RepoCache) EnsureBareRepo(repoURL, repoName, token string) (string, err
 
 	if _, err := os.Stat(barePath); os.IsNotExist(err) {
 		// First time — clone.
-		log.Printf("[repocache] bare clone %s → %s", repoURL, barePath)
+		slog.Info("repocache: bare clone", "repo", repoURL, "dest", barePath)
 		out, err := exec.Command("git", "clone", "--bare", "--", authURL, barePath).CombinedOutput()
 		if err != nil {
 			return "", fmt.Errorf("git clone --bare %s: %s: %w", repoURL, out, err)
@@ -114,18 +114,18 @@ func (c *RepoCache) EnsureBareRepo(repoURL, repoName, token string) (string, err
 		// but not necessarily the remote tracking refs.  Explicitly set it.
 		if err := runInRepo(barePath, "git", "config", "remote.origin.fetch",
 			"+refs/heads/*:refs/heads/*"); err != nil {
-			log.Printf("[repocache] warning: set fetch refspec: %v", err)
+			slog.Warn("repocache: set fetch refspec", "err", err)
 		}
 	} else if err == nil {
 		// Already exists — fetch to update.
-		log.Printf("[repocache] fetching updates for %s", barePath)
+		slog.Info("repocache: fetching updates", "bare_path", barePath)
 		// We must use the authenticated URL; the origin remote may still have
 		// the bare URL without a token.
 		out, err := exec.Command("git", "-C", barePath, "fetch", "--prune", authURL,
 			"+refs/heads/*:refs/heads/*").CombinedOutput()
 		if err != nil {
 			// Non-fatal: log and continue — stale clone is better than failing the session.
-			log.Printf("[repocache] warning: fetch %s: %s: %v", repoURL, out, err)
+			slog.Warn("repocache: fetch", "repo", repoURL, "output", string(out), "err", err)
 		}
 	} else {
 		return "", fmt.Errorf("stat %s: %w", barePath, err)
@@ -158,27 +158,27 @@ func (c *RepoCache) LocalClone(barePath, sessionID, repoName, branch, repoURL st
 	}
 	args = append(args, "--", barePath, dest)
 
-	log.Printf("[repocache] local clone %s → %s", barePath, dest)
+	slog.Info("repocache: local clone", "src", barePath, "dest", dest)
 	cmd := exec.Command("git", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("git clone --local %s: %s: %w", barePath, out, err)
 	}
 
-	log.Printf("[repocache] local clone complete: %s", dest)
+	slog.Info("repocache: local clone complete", "dest", dest)
 
 	// Repoint origin to the canonical remote URL so git commands inside the VM
 	// work against the real remote.  git clone --local sets origin to the
 	// host-side bare repo path, which doesn't exist inside the VM.
 	if repoURL != "" {
 		if out, err := exec.Command("git", "-C", dest, "remote", "set-url", "origin", repoURL).CombinedOutput(); err != nil {
-			log.Printf("[repocache] warning: set remote origin %s: %s: %v", dest, out, err)
+			slog.Warn("repocache: set remote origin", "dest", dest, "output", string(out), "err", err)
 		}
 	}
 
 	// Chown to UID/GID 1000 (the claude user inside every VM) so the NFS
 	// mount is writable without root_squash gymnastics.
 	if out, err := exec.Command("chown", "-R", "1000:1000", dest).CombinedOutput(); err != nil {
-		log.Printf("[repocache] warning: chown workspace %s: %s: %v", dest, out, err)
+		slog.Warn("repocache: chown workspace", "dest", dest, "output", string(out), "err", err)
 	}
 
 	return dest, nil
@@ -192,9 +192,9 @@ func (c *RepoCache) LocalClone(barePath, sessionID, repoName, branch, repoURL st
 func (c *RepoCache) CleanupWorkspace(sessionID string) {
 	wsDir := c.WorkspaceDir(sessionID)
 	if err := os.RemoveAll(wsDir); err != nil {
-		log.Printf("[repocache] warning: cleanup workspace %s: %v", wsDir, err)
+		slog.Warn("repocache: cleanup workspace", "dir", wsDir, "err", err)
 	} else {
-		log.Printf("[repocache] cleaned up workspace %s", wsDir)
+		slog.Info("repocache: cleaned up workspace", "dir", wsDir)
 	}
 }
 

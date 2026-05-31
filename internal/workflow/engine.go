@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"regexp"
 	"strings"
 	"sync"
@@ -135,7 +135,7 @@ func (e *Engine) run(ctx context.Context, id string) {
 	// Add implement stages to the workflow.
 	wf, ok := e.store.Get(id)
 	if !ok {
-		log.Printf("[workflow %s] not found after plan stage", id[:8])
+		slog.Warn("workflow not found after plan stage", "workflow", id[:8])
 		return
 	}
 	for i, task := range tasks {
@@ -155,7 +155,7 @@ func (e *Engine) run(ctx context.Context, id string) {
 	// Reload to get the updated stage slice with stable indices.
 	wf, ok = e.store.Get(id)
 	if !ok {
-		log.Printf("[workflow %s] not found before implement fan-out", id[:8])
+		slog.Warn("workflow not found before implement fan-out", "workflow", id[:8])
 		return
 	}
 
@@ -200,7 +200,7 @@ func (e *Engine) run(ctx context.Context, id string) {
 	// Mark workflow terminal.
 	wf, ok = e.store.Get(id)
 	if !ok {
-		log.Printf("[workflow %s] not found after implement fan-out", id[:8])
+		slog.Warn("workflow not found after implement fan-out", "workflow", id[:8])
 		return
 	}
 	if firstErr != nil {
@@ -210,9 +210,9 @@ func (e *Engine) run(ctx context.Context, id string) {
 		wf.Status = StatusDone
 	}
 	if err := e.store.Upsert(wf); err != nil {
-		log.Printf("[workflow %s] persist final status: %v", id[:8], err)
+		slog.Warn("workflow: persist final status", "workflow", id[:8], "err", err)
 	}
-	log.Printf("[workflow %s] finished with status=%s", id[:8], wf.Status)
+	slog.Info("workflow: finished", "workflow", id[:8], "status", wf.Status)
 }
 
 // executeNamedStage finds the first pending stage of the given kind, executes
@@ -298,7 +298,7 @@ func (e *Engine) runStage(ctx context.Context, wfID, stageID string, kind StageK
 		if !strings.Contains(cerr.Error(), "no slots available") {
 			return e.markStageFailed(wfID, stageID, fmt.Errorf("create session: %w", cerr))
 		}
-		log.Printf("[workflow %s] stage %s waiting for a free slot...", wfID, stageID)
+		slog.Info("workflow: waiting for free slot", "workflow", wfID, "stage", stageID)
 		select {
 		case <-ctx.Done():
 			return e.markStageFailed(wfID, stageID, ctx.Err())
@@ -337,7 +337,7 @@ func (e *Engine) runStage(ctx context.Context, wfID, stageID string, kind StageK
 	if err := e.store.Upsert(wf); err != nil {
 		return fmt.Errorf("persist stage %s done: %w", stageID, err)
 	}
-	log.Printf("[workflow %s] stage %s done (%d bytes)", wfID[:8], stageID, len(result))
+	slog.Info("workflow: stage done", "workflow", wfID[:8], "stage", stageID, "bytes", len(result))
 	return nil
 }
 
@@ -346,7 +346,7 @@ func (e *Engine) runStage(ctx context.Context, wfID, stageID string, kind StageK
 func (e *Engine) markStageFailed(wfID, stageID string, cause error) error {
 	wf, ok := e.store.Get(wfID)
 	if !ok {
-		log.Printf("[workflow %s] cannot mark stage %s failed: workflow not found", wfID[:8], stageID)
+		slog.Warn("workflow: cannot mark stage failed, workflow not found", "workflow", wfID[:8], "stage", stageID)
 		return cause
 	}
 	idx := stageIndex(wf, stageID)
@@ -359,7 +359,7 @@ func (e *Engine) markStageFailed(wfID, stageID string, cause error) error {
 
 // failWorkflow marks the workflow as StatusFailed and logs.
 func (e *Engine) failWorkflow(id string, cause error) {
-	log.Printf("[workflow %s] failed: %v", id[:8], cause)
+	slog.Error("workflow: failed", "workflow", id[:8], "err", cause)
 	wf, ok := e.store.Get(id)
 	if !ok {
 		return
@@ -417,7 +417,7 @@ func (e *Engine) RecoverInProgress(ctx context.Context) error {
 			recovered++
 		}
 	}
-	log.Printf("[workflow] RecoverInProgress: recovered %d in-progress workflow(s)", recovered)
+	slog.Info("workflow: RecoverInProgress", "recovered", recovered)
 	return nil
 }
 

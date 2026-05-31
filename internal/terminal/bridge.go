@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -121,7 +121,7 @@ func (b *Bridge) relay(ws *websocket.Conn, startCmd string, connStart time.Time)
 		return
 	}
 
-	log.Printf("[terminal] session ready in %s", time.Since(connStart).Round(time.Millisecond))
+	slog.Info("terminal: session ready", "elapsed", time.Since(connStart).Round(time.Millisecond))
 
 	done := make(chan struct{})
 
@@ -134,7 +134,7 @@ func (b *Bridge) relay(ws *websocket.Conn, startCmd string, connStart time.Time)
 			n, err := stdout.Read(buf)
 			if n > 0 {
 				if first {
-					log.Printf("[terminal] first byte from PTY in %s", time.Since(connStart).Round(time.Millisecond))
+					slog.Info("terminal: first byte from PTY", "elapsed", time.Since(connStart).Round(time.Millisecond))
 					first = false
 				}
 				if err := ws.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {

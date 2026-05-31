@@ -2,7 +2,7 @@ package firecracker
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strconv"
@@ -126,9 +126,9 @@ func (s *SnapshotManager) discoverState() error {
 		if volID >= s.nextVolumeID {
 			s.nextVolumeID = volID + 1
 			if err := os.WriteFile(s.idPath, []byte(strconv.Itoa(s.nextVolumeID)), 0644); err != nil {
-				log.Printf("[snapshot] warning: persist reconciled next-volume-id=%d: %v", s.nextVolumeID, err)
+				slog.Warn("snapshot: persist reconciled next-volume-id", "next_volume_id", s.nextVolumeID, "err", err)
 			} else {
-				log.Printf("[snapshot] reconciled next-volume-id → %d", s.nextVolumeID)
+				slog.Info("snapshot: reconciled next-volume-id", "next_volume_id", s.nextVolumeID)
 			}
 		}
 	}

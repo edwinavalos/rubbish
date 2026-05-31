@@ -9,7 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -224,7 +224,7 @@ func (m *SessionManager) persistSession(sess *Session) {
 	}
 	m.mu.RUnlock()
 	if err := m.store.Upsert(row); err != nil {
-		log.Printf("[session %s] persist error: %v", sess.ID[:8], err)
+		slog.Warn("session: persist error", "session", sess.ID[:8], "err", err)
 	}
 }
 
@@ -233,7 +233,7 @@ func (m *SessionManager) persistSession(sess *Session) {
 func (m *SessionManager) newSM(sess *Session, initial session.State) *session.StateMachine {
 	sm := session.New(initial)
 	sm.OnTransition(func(from, to session.State, elapsed time.Duration) {
-		log.Printf("[session %s] %s → %s (%.2fs)", sess.ID[:8], from, to, elapsed.Seconds())
+		slog.Info("session: state transition", "session", sess.ID[:8], "from", from, "to", to, "elapsed_s", elapsed.Seconds())
 		m.persistSession(sess)
 	})
 	return sm
@@ -302,7 +302,7 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 
 	// t logs how long a named step took and returns the current time for the next step.
 	t := func(step string, since time.Time) time.Time {
-		log.Printf("[session %s] %-28s %s", sid, step, time.Since(since).Round(time.Millisecond))
+		slog.Info("session: step", "session", sid, "step", step, "elapsed", time.Since(since).Round(time.Millisecond))
 		return time.Now()
 	}
 
@@ -312,7 +312,7 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		delete(m.usedSlots, sess.Slot)
 		m.mu.Unlock()
 		sess.sm.Transition(session.StateFailed) //nolint:errcheck — hook persists
-		log.Printf("[session %s] failed: %v", sid, err)
+		slog.Error("session: failed", "session", sid, "err", err)
 	}
 
 	// Resolve the token once — prefer the per-request token, then the stored profile/file.
@@ -341,12 +341,12 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		barePath, err := m.repoCache.EnsureBareRepo(sess.RepoURL, repoName, token)
 		stepT = t("repo_fetch", stepT)
 		if err != nil {
-			log.Printf("[session %s] warning: bare repo fetch: %v", sid, err)
+			slog.Warn("session: bare repo fetch", "session", sid, "err", err)
 		} else {
 			destPath, err := m.repoCache.LocalClone(barePath, sess.ID, repoName, sess.Branch, sess.RepoURL)
 			t("local_clone", stepT)
 			if err != nil {
-				log.Printf("[session %s] warning: local clone: %v", sid, err)
+				slog.Warn("session: local clone", "session", sid, "err", err)
 			} else {
 				m.mu.Lock()
 				sess.workspacePath = destPath
@@ -377,7 +377,7 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 	// 3. Boot VM → Booting
 	if err := sess.sm.Transition(session.StateBooting); err != nil {
 		m.snap.DeleteSnapshot(sess.ID) //nolint:errcheck
-		log.Printf("[session %s] transition error: %v", sid, err)
+		slog.Error("session: transition error", "session", sid, "err", err)
 		return
 	}
 	memMiB := int64(512)
@@ -399,7 +399,7 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 	if err := sess.sm.Transition(session.StateWaitingSSH); err != nil {
 		v.Stop(ctx)                    //nolint:errcheck
 		m.snap.DeleteSnapshot(sess.ID) //nolint:errcheck
-		log.Printf("[session %s] transition error: %v", sid, err)
+		slog.Error("session: transition error", "session", sid, "err", err)
 		return
 	}
 	stepT = time.Now()
@@ -414,7 +414,7 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 
 	// 5. Git setup → Configuring
 	if err := sess.sm.Transition(session.StateConfiguring); err != nil {
-		log.Printf("[session %s] transition error: %v", sid, err)
+		slog.Error("session: transition error", "session", sid, "err", err)
 		return
 	}
 
@@ -437,7 +437,7 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 			"chmod 600 /home/claude/.ssh/authorized_keys",
 			"chown -R claude:claude /home/claude/.ssh",
 		}); err != nil {
-			log.Printf("[session %s] warning: inject claude pubkey: %v", sid, err)
+			slog.Warn("session: inject claude pubkey", "session", sid, "err", err)
 		}
 		t("configure_key", stepT)
 	}
@@ -446,7 +446,7 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 	if token != "" {
 		if githubToken != "" {
 			if err := saveToken(m.credPath, githubToken); err != nil {
-				log.Printf("[session %s] warning: save token: %v", sid, err)
+				slog.Warn("session: save token", "session", sid, "err", err)
 			}
 		}
 		cmds := []string{
@@ -455,11 +455,11 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		}
 		stepT = time.Now()
 		if err := bridge.RunSetup(cmds); err != nil {
-			log.Printf("[session %s] warning: git credential setup: %v", sid, err)
+			slog.Warn("session: git credential setup", "session", sid, "err", err)
 		}
 		t("configure_git", stepT)
 	} else {
-		log.Printf("[session %s] no GitHub token available — private repos will fail to clone", sid)
+		slog.Warn("session: no GitHub token available, private repos will fail", "session", sid)
 	}
 
 	// Mount the workspace into the VM via NFS and verify it landed.
@@ -488,7 +488,7 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 	// VM's RAM limit.  Non-fatal: a miss here degrades to cold-cache builds.
 	stepT = time.Now()
 	if err := mountGoCache(bridge, m.devHostIP); err != nil {
-		log.Printf("[session %s] warning: mount go-cache: %v", sid, err)
+		slog.Warn("session: mount go-cache", "session", sid, "err", err)
 	}
 	t("mount_go_cache", stepT)
 
@@ -500,7 +500,7 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		"sudo hostname " + vmHostname,
 		"echo " + vmHostname + " | sudo tee /etc/hostname > /dev/null",
 	}); err != nil {
-		log.Printf("[session %s] warning: set hostname: %v", sid, err)
+		slog.Warn("session: set hostname", "session", sid, "err", err)
 	}
 	t("configure_hostname", stepT)
 
@@ -510,7 +510,7 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 	if err := bridge.RunSetup([]string{
 		"printf 'export GOTOOLCHAIN=local\\nexport PATH=/usr/local/go/bin:$PATH\\n' >> ~/.profile",
 	}); err != nil {
-		log.Printf("[session %s] warning: inject go env: %v", sid, err)
+		slog.Warn("session: inject go env", "session", sid, "err", err)
 	}
 
 	if m.prof != nil {
@@ -538,7 +538,7 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 			}
 			stepT = time.Now()
 			if err := bridge.RunSetup(cmds); err != nil {
-				log.Printf("[session %s] warning: inject credentials: %v", sid, err)
+				slog.Warn("session: inject credentials", "session", sid, "err", err)
 			}
 			t("configure_profile", stepT)
 		}
@@ -548,21 +548,21 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 	if sess.DevMode {
 		stepT = time.Now()
 		if err := seedDevFiles(bridge, m.devHostIP); err != nil {
-			log.Printf("[session %s] warning: dev seed: %v", sid, err)
+			slog.Warn("session: dev seed", "session", sid, "err", err)
 		}
 		t("configure_seed", stepT)
 	}
 
 	// 7. Ready
 	if err := sess.sm.Transition(session.StateReady); err != nil {
-		log.Printf("[session %s] transition error: %v", sid, err)
+		slog.Error("session: transition error", "session", sid, "err", err)
 		return
 	}
-	log.Printf("[session %s] ready (slot=%d ip=%s) total=%s", sid, sess.Slot, vm.SlotIP(sess.Slot), time.Since(bootStart).Round(time.Millisecond))
+	slog.Info("session: ready", "session", sid, "slot", sess.Slot, "ip", vm.SlotIP(sess.Slot), "total", time.Since(bootStart).Round(time.Millisecond))
 
 	// 8. Non-interactive path: run claude -p, capture output, then stop.
 	if sess.Role != "interactive" {
-		log.Printf("[session %s] non-interactive mode (role=%s), running claude -p", sid, sess.Role)
+		slog.Info("session: non-interactive mode, running claude -p", "session", sid, "role", sess.Role)
 		claudeCtx, claudeCancel := context.WithTimeout(ctx, 30*time.Minute)
 		defer claudeCancel()
 		_ = claudeCtx // context reserved for future SSH timeout integration
@@ -572,7 +572,7 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		innerCmd := "claude --dangerously-skip-permissions -p " + shellQuote(sess.Prompt)
 		cmd := "bash -lc " + shellQuote(innerCmd)
 		if err := sess.bridge.RunSetupCapture([]string{cmd}, &buf); err != nil {
-			log.Printf("[session %s] claude -p error: %v", sid, err)
+			slog.Warn("session: claude -p error", "session", sid, "err", err)
 		}
 		result := buf.String()
 
@@ -580,11 +580,11 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		sess.Result = result
 		m.mu.Unlock()
 
-		log.Printf("[session %s] claude -p finished (%d bytes), stopping", sid, len(result))
+		slog.Info("session: claude -p finished, stopping", "session", sid, "bytes", len(result))
 
 		// Transition to Stopping and run cleanup inline (we're already in a goroutine).
 		if err := sess.sm.Transition(session.StateStopping); err != nil {
-			log.Printf("[session %s] transition to stopping error: %v", sid, err)
+			slog.Error("session: transition to stopping error", "session", sid, "err", err)
 		}
 		// Persist result before stopping.
 		m.persistSession(sess)
@@ -593,7 +593,7 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		if sess.v != nil {
 			stopCtx, stopCancel := context.WithTimeout(context.Background(), 8*time.Second)
 			if err := sess.v.Stop(stopCtx); err != nil {
-				log.Printf("[session %s] stop vm: %v", sid, err)
+				slog.Warn("session: stop vm", "session", sid, "err", err)
 			}
 			stopCancel()
 			vm.WaitForVMDead(vm.SlotIP(sess.Slot))
@@ -612,7 +612,7 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		if m.repoCache != nil {
 			m.repoCache.CleanupWorkspace(sess.ID)
 		}
-		log.Printf("[session %s] non-interactive session stopped and removed", sid)
+		slog.Info("session: non-interactive session stopped and removed", "session", sid)
 	}
 }
 
@@ -673,7 +673,7 @@ func (m *SessionManager) Stop(id string) error {
 		if sess.v != nil {
 			stopCtx, stopCancel := context.WithTimeout(context.Background(), 8*time.Second)
 			if err := sess.v.Stop(stopCtx); err != nil {
-				log.Printf("[session %s] stop vm: %v", id[:8], err)
+				slog.Warn("session: stop vm", "session", id[:8], "err", err)
 			}
 			stopCancel()
 			// Wait until port 22 stops answering before freeing the slot.
@@ -692,7 +692,7 @@ func (m *SessionManager) Stop(id string) error {
 		if m.store != nil {
 			m.store.Delete(id) //nolint:errcheck
 		}
-		log.Printf("[session %s] stopped and removed", id[:8])
+		slog.Info("session: stopped and removed", "session", id[:8])
 
 		// NFS workspace cleanup runs last: if the VM died while holding the
 		// NFS mount open, os.RemoveAll blocks until the NFS server TCP-keepalive
@@ -900,7 +900,7 @@ func (m *SessionManager) loadFromDB(parentCtx context.Context) {
 	}
 	rows, err := m.store.List()
 	if err != nil {
-		log.Printf("[startup] load sessions from DB: %v", err)
+		slog.Warn("startup: load sessions from DB", "err", err)
 		return
 	}
 
@@ -930,7 +930,7 @@ func (m *SessionManager) loadFromDB(parentCtx context.Context) {
 				vmAddr := fmt.Sprintf("%s:%d", vm.SlotIP(row.Slot), vm.VMSSHPort)
 				sess.bridge = m.bridges.NewBridge(vmAddr, m.signer)
 				liveSlots[row.Slot] = true
-				log.Printf("[startup] recovered ready session %s (slot=%d ip=%s)", row.ID[:8], row.Slot, vm.SlotIP(row.Slot))
+				slog.Info("startup: recovered ready session", "session", row.ID[:8], "slot", row.Slot, "ip", vm.SlotIP(row.Slot))
 			} else {
 				// Host restarted — VM is gone.
 				cancel()
@@ -943,7 +943,7 @@ func (m *SessionManager) loadFromDB(parentCtx context.Context) {
 					RepoURL: row.RepoURL, Branch: row.Branch, ErrorMsg: sess.Error,
 					DevMode: row.DevMode, CreatedAt: row.CreatedAt, UpdatedAt: time.Now(),
 				})
-				log.Printf("[startup] session %s was ready but VM is gone, marked failed", row.ID[:8])
+				slog.Warn("startup: session was ready but VM is gone, marked failed", "session", row.ID[:8])
 			}
 
 		case session.StateProvisioning, session.StateBooting,
@@ -963,13 +963,13 @@ func (m *SessionManager) loadFromDB(parentCtx context.Context) {
 				RepoURL: row.RepoURL, Branch: row.Branch, ErrorMsg: sess.Error,
 				DevMode: row.DevMode, CreatedAt: row.CreatedAt, UpdatedAt: time.Now(),
 			})
-			log.Printf("[startup] session %s in mid-boot state %s, marked failed", row.ID[:8], status)
+			slog.Warn("startup: session in mid-boot state, marked failed", "session", row.ID[:8], "status", status)
 
 		default: // stopped, failed — terminal states, load as-is
 			cancel()
 			sess.cancel = func() {}
 			sess.sm = m.newSM(sess, status)
-			log.Printf("[startup] loaded terminal session %s (%s)", row.ID[:8], status)
+			slog.Info("startup: loaded terminal session", "session", row.ID[:8], "status", status)
 		}
 
 		_ = ctx // context held by sess.cancel for live sessions; suppresses unused-variable warning
@@ -984,7 +984,7 @@ func (m *SessionManager) loadFromDB(parentCtx context.Context) {
 
 	// Kill any FC sockets that have no corresponding DB session.
 	if err := vm.CleanupOrphansExcept(m.maxSlots, liveSlots); err != nil {
-		log.Printf("[startup] cleanup orphans warning: %v", err)
+		slog.Warn("startup: cleanup orphans", "err", err)
 	}
 
 }
@@ -1072,7 +1072,7 @@ func seedDevFiles(bridge setupRunner, hostIP string) error {
 
 	// CLAUDE.md — static, base64-injected (does not need live sync).
 	if err := injectFile(devSeedDir+"/claude/CLAUDE.md", vmHome+"/.claude/CLAUDE.md"); err != nil {
-		log.Printf("[seed] warning: CLAUDE.md: %v", err)
+		slog.Warn("seed: CLAUDE.md", "err", err)
 	}
 
 	// Memory dirs — NFS-mounted for live shared read/write across all dev sessions.
@@ -1083,7 +1083,7 @@ func seedDevFiles(bridge setupRunner, hostIP string) error {
 	}); err != nil {
 		return fmt.Errorf("nfs mount: %w", err)
 	}
-	log.Printf("[seed] NFS memory mounts established (host=%s)", hostIP)
+	slog.Info("seed: NFS memory mounts established", "host", hostIP)
 
 	// Deploy SSH key (fatal — without it the VM can't deploy)
 	if err := injectFile(devSeedDir+"/id_deploy", vmSSHDir+"/id_deploy"); err != nil {
@@ -1108,13 +1108,13 @@ func seedDevFiles(bridge setupRunner, hostIP string) error {
 	knownHosts, err := os.ReadFile(devSeedDir + "/known_hosts")
 	if err == nil && len(knownHosts) > 0 {
 		if err := injectFile(devSeedDir+"/known_hosts", vmSSHDir+"/known_hosts"); err != nil {
-			log.Printf("[seed] warning: known_hosts: %v", err)
+			slog.Warn("seed: known_hosts", "err", err)
 		} else {
 			bridge.RunSetup([]string{"chmod 644 " + vmSSHDir + "/known_hosts"}) //nolint:errcheck
 		}
 	}
 
-	log.Printf("[seed] dev files injected (host=%s)", hostIP)
+	slog.Info("seed: dev files injected", "host", hostIP)
 	return nil
 }
 
@@ -1395,39 +1395,39 @@ func main() {
 		if flag.NArg() > 0 {
 			*keyFlag = flag.Arg(0)
 		} else {
-			log.Fatal("usage: rubbish-poc --key <path-to-ssh-private-key>")
+			slog.Error("usage: rubbish-poc --key <path-to-ssh-private-key>"); os.Exit(1)
 		}
 	}
 
 	keyBytes, err := os.ReadFile(*keyFlag)
 	if err != nil {
-		log.Fatalf("read ssh key: %v", err)
+		slog.Error("read ssh key", "err", err); os.Exit(1)
 	}
 	signer, err := ssh.ParsePrivateKey(keyBytes)
 	if err != nil {
-		log.Fatalf("parse ssh key: %v", err)
+		slog.Error("parse ssh key", "err", err); os.Exit(1)
 	}
 
 	snapMgr, err := fc.NewSnapshotManager("/dev/mapper/rubbish-pool", "/opt/rubbish/dm/next-volume-id")
 	if err != nil {
-		log.Fatalf("snapshot manager: %v", err)
+		slog.Error("snapshot manager", "err", err); os.Exit(1)
 	}
 
 	credPath := "/opt/rubbish/creds/github-token"
 	if err := os.MkdirAll("/opt/rubbish/creds", 0700); err != nil {
-		log.Fatalf("create creds dir: %v", err)
+		slog.Error("create creds dir", "err", err); os.Exit(1)
 	}
 
 	store, err := sessionstore.Open("/opt/rubbish/sessions.db")
 	if err != nil {
-		log.Fatalf("open session store: %v", err)
+		slog.Error("open session store", "err", err); os.Exit(1)
 	}
 	defer store.Close()
 
 	prof := profile.NewStore("/opt/rubbish/creds/profile.json")
 	mgr := NewSessionManager(snapMgr, signer, credPath, prof, store, *slotsFlag, *devHostIPFlag)
 
-	log.Println("[startup] recovering sessions from DB...")
+	slog.Info("startup: recovering sessions from DB")
 	mgr.loadFromDB(context.Background())
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1435,7 +1435,7 @@ func main() {
 
 	wfStore, err := workflow.Open(filepath.Join(filepath.Dir("/opt/rubbish/sessions.db"), "workflows.json"))
 	if err != nil {
-		log.Fatalf("open workflow store: %v", err)
+		slog.Error("open workflow store", "err", err); os.Exit(1)
 	}
 
 	mgr.serverCtx = ctx
@@ -1457,9 +1457,9 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("[poc] serving on %s", srv.Addr)
+		slog.Info("poc: serving", "addr", srv.Addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server: %v", err)
+			slog.Error("server", "err", err); os.Exit(1)
 		}
 	}()
 
@@ -1467,7 +1467,7 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("[poc] shutting down...")
+	slog.Info("poc: shutting down")
 	// Do NOT call StopAll — ready VMs are left running so they can be recovered
 	// on the next startup via loadFromDB + DetachedVM reconnection.
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 15*time.Second)

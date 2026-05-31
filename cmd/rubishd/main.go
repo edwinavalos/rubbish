@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v2"
 )
 
@@ -98,24 +98,23 @@ func main() {
 	configPath := flag.String("config", "/etc/rubbish/config.yaml", "path to config file")
 	flag.Parse()
 
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+
 	data, err := os.ReadFile(*configPath)
 	if err != nil {
-		logrus.WithError(err).Fatal("failed to read config file")
+		slog.Error("failed to read config file", "err", err); os.Exit(1)
 	}
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		logrus.WithError(err).Fatal("failed to parse config file")
+		slog.Error("failed to parse config file", "err", err); os.Exit(1)
 	}
 	applyDefaults(&cfg)
 
-	log := logrus.New()
-	log.SetFormatter(&logrus.JSONFormatter{})
-
-	log.WithFields(logrus.Fields{
-		"node_id":          cfg.Node.ID,
-		"listen_addr":      cfg.Node.ListenAddr,
-		"compute_provider": cfg.Compute.Provider,
-	}).Info("rubishd starting")
+	slog.Info("rubishd starting",
+		"node_id", cfg.Node.ID,
+		"listen_addr", cfg.Node.ListenAddr,
+		"compute_provider", cfg.Compute.Provider,
+	)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -132,9 +131,9 @@ func main() {
 	}
 
 	go func() {
-		log.WithField("addr", cfg.Node.ListenAddr).Info("listening")
+		slog.Info("listening", "addr", cfg.Node.ListenAddr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.WithError(err).Fatal("server error")
+			slog.Error("server error", "err", err); os.Exit(1)
 		}
 	}()
 
@@ -142,10 +141,10 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Info("shutting down")
+	slog.Info("shutting down")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
-		log.WithError(err).Error("shutdown error")
+		slog.Error("shutdown error", "err", err)
 	}
 }
