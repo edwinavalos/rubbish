@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/edwinavalos/rubbish/internal/gitutil"
 )
 
 // ErrUsageLimit is returned when an agent session result indicates the Claude
@@ -39,19 +41,25 @@ type SessionStarter interface {
 	WaitForSession(ctx context.Context, id string) (result string, err error)
 }
 
+// mergeFnType is the signature of the function used to merge implement branches.
+type mergeFnType func(ctx context.Context, repoURL, baseBranch, token string, branches []string) (merged, failed []string, err error)
+
 // Engine drives the rigid research→plan→implement pipeline.
 type Engine struct {
 	store      *Store
 	sessions   SessionStarter
-	maxWorkers int     // limits concurrent implement-stage sessions; default 3
+	maxWorkers int            // limits concurrent implement-stage sessions; default 3
 	serverCtx  context.Context // lifetime context for background goroutines
+	token      string          // GitHub token for merging implement branches
+	mergeFn    mergeFnType
 }
 
 // NewEngine constructs an Engine. maxWorkers controls the implement fan-out
 // concurrency; pass 0 or negative to use the default of 3. serverCtx should
 // be the server's lifetime context so workflow goroutines aren't canceled when
-// the HTTP request that triggered Submit finishes.
-func NewEngine(serverCtx context.Context, store *Store, sessions SessionStarter, maxWorkers int) *Engine {
+// the HTTP request that triggered Submit finishes. token is the GitHub token
+// used to authenticate git operations during the merge stage.
+func NewEngine(serverCtx context.Context, store *Store, sessions SessionStarter, maxWorkers int, token string) *Engine {
 	if maxWorkers <= 0 {
 		maxWorkers = 3
 	}
@@ -63,7 +71,19 @@ func NewEngine(serverCtx context.Context, store *Store, sessions SessionStarter,
 		sessions:   sessions,
 		maxWorkers: maxWorkers,
 		serverCtx:  serverCtx,
+		token:      token,
+		mergeFn:    gitutil.MergeImplementBranches,
 	}
+}
+
+// implementBranchName returns the git branch name for an implement stage.
+// stageIdx is 0-based among implement stages only.
+func implementBranchName(wfID string, stageIdx int) string {
+	short := wfID
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	return fmt.Sprintf("implement/%s-%d", short, stageIdx)
 }
 
 // newID generates a random 32-character hex workflow ID.
@@ -78,23 +98,29 @@ func newID() (string, error) {
 // Submit creates a new workflow run and starts driving it asynchronously.
 // Returns the workflow ID immediately.
 func (e *Engine) Submit(ctx context.Context, input, repoURL, branch string) (string, error) {
+	return e.SubmitWorkflow(ctx, &Workflow{
+		Input:   input,
+		RepoURL: repoURL,
+		Branch:  branch,
+	})
+}
+
+// SubmitWorkflow is like Submit but accepts a pre-populated Workflow so callers
+// can set optional fields like Config before submission. The ID, Status, CreatedAt,
+// and Stages fields are overwritten.
+func (e *Engine) SubmitWorkflow(ctx context.Context, wf *Workflow) (string, error) {
 	id, err := newID()
 	if err != nil {
 		return "", err
 	}
 
 	now := time.Now()
-	wf := &Workflow{
-		ID:        id,
-		Input:     input,
-		RepoURL:   repoURL,
-		Branch:    branch,
-		Status:    StatusQueued,
-		CreatedAt: now,
-		Stages: []Stage{
-			{ID: id + "-research", Kind: KindResearch, Status: StagePending},
-			{ID: id + "-plan", Kind: KindPlan, Status: StagePending},
-		},
+	wf.ID = id
+	wf.Status = StatusQueued
+	wf.CreatedAt = now
+	wf.Stages = []Stage{
+		{ID: id + "-research", Kind: KindResearch, Status: StagePending},
+		{ID: id + "-plan", Kind: KindPlan, Status: StagePending},
 	}
 
 	if err := e.store.Upsert(wf); err != nil {
@@ -114,10 +140,11 @@ func (e *Engine) Submit(ctx context.Context, input, repoURL, branch string) (str
 func (e *Engine) run(ctx context.Context, id string) {
 	// ----- research stage -----
 	researchOutput, err := e.executeNamedStage(ctx, id, KindResearch, 60*time.Minute, func(wf *Workflow) string {
-		return "You are a research agent. Investigate the following goal and provide structured findings that will be used by a planning agent.\n\n" +
-			"Goal: " + wf.Input + "\n\n" +
-			"Repository: " + wf.RepoURL + " (branch: " + wf.Branch + ")\n\n" +
-			"Provide thorough findings in plain text."
+		return ResearchPrompt(StageConfig{
+			Goal:    wf.Input,
+			RepoURL: wf.RepoURL,
+			Branch:  wf.Branch,
+		})
 	})
 	if err != nil {
 		e.failWorkflow(id, err)
@@ -126,24 +153,22 @@ func (e *Engine) run(ctx context.Context, id string) {
 
 	// ----- plan stage -----
 	planOutput, err := e.executeNamedStage(ctx, id, KindPlan, 20*time.Minute, func(wf *Workflow) string {
-		return "You are a planning agent. Based on the research findings below, create a concrete implementation plan.\n\n" +
-			"Goal: " + wf.Input + "\n\n" +
-			"Research findings:\n" + researchOutput + "\n\n" +
-			"Output ONLY a JSON array of task objects. Each object must have:\n" +
-			"- \"id\": a short unique identifier (e.g. \"task-1\")\n" +
-			"- \"description\": a clear, self-contained task description that a coding agent can execute independently\n\n" +
-			"Example: [{\"id\":\"task-1\",\"description\":\"Add X to file Y\"},{\"id\":\"task-2\",\"description\":\"Update Z\"}]\n\n" +
-			"Do not include any text before or after the JSON array."
+		return PlanPrompt(StageConfig{
+			Goal:           wf.Input,
+			RepoURL:        wf.RepoURL,
+			Branch:         wf.Branch,
+			PreviousOutput: researchOutput,
+		})
 	})
 	if err != nil {
 		e.failWorkflow(id, err)
 		return
 	}
 
-	// Parse plan output into tasks.
-	tasks, err := parsePlanOutput(planOutput)
+	// Validate plan output — structural check before spinning up any VMs.
+	tasks, err := ValidatePlanOutput(planOutput)
 	if err != nil {
-		e.failWorkflow(id, fmt.Errorf("parse plan output: %w", err))
+		e.failWorkflow(id, fmt.Errorf("plan validation: %w", err))
 		return
 	}
 
@@ -178,49 +203,223 @@ func (e *Engine) run(ctx context.Context, id string) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var firstErr error
+	var succeededBranches []string
 
+	implTaskIdx := 0
 	for i := range wf.Stages {
 		if wf.Stages[i].Kind != KindImplement {
 			continue
 		}
 		stageIdx := i
+		taskIdx := implTaskIdx
+		implTaskIdx++
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			stage := &wf.Stages[stageIdx]
-			taskDesc := stage.Input // captured before any mutation
+			stageID := wf.Stages[stageIdx].ID
+			taskDesc := wf.Stages[stageIdx].Input // captured before any mutation
+			branchName := implementBranchName(id, taskIdx)
 
 			implCtx, implCancel := context.WithTimeout(ctx, 45*time.Minute)
 			defer implCancel()
 
-			prompt := "You are a coding agent. Complete the following task.\n\n" +
-				"Task: " + taskDesc + "\n\n" +
-				"Repository: " + wf.RepoURL + " (branch: " + wf.Branch + ")\n\n" +
-				"Implement the task completely. Commit your changes when done."
+			prompt := ImplementPrompt(StageConfig{
+				Goal:           wf.Input,
+				RepoURL:        wf.RepoURL,
+				Branch:         branchName,
+				PreviousOutput: taskDesc,
+			})
 
-			if runErr := e.runStage(implCtx, id, stage.ID, KindImplement, prompt); runErr != nil {
+			if runErr := e.runStage(implCtx, id, stageID, KindImplement, prompt); runErr != nil {
 				mu.Lock()
 				if firstErr == nil {
 					firstErr = runErr
 				}
 				mu.Unlock()
+				return
 			}
+
+			// Reload output for structural validation.
+			freshWF, ok2 := e.store.Get(id)
+			if !ok2 {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("workflow %s not found after implement stage", id)
+				}
+				mu.Unlock()
+				return
+			}
+			implIdx := stageIndex(freshWF, stageID)
+			if implIdx < 0 {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("implement stage %s not found after execution", stageID)
+				}
+				mu.Unlock()
+				return
+			}
+			implOutput := freshWF.Stages[implIdx].Output
+			implementSessionID := freshWF.Stages[implIdx].SessionID
+
+			// Structural validation — fast check before spinning up a verify VM.
+			structOK, structIssues := ValidateImplementOutput(implOutput)
+			if !structOK {
+				issueMsg := strings.Join(structIssues, "; ")
+				e.markStageFailed(id, stageID, fmt.Errorf("structural validation: %s", issueMsg))
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("implement stage %s structural validation: %s", stageID, issueMsg)
+				}
+				mu.Unlock()
+				return
+			}
+
+			// External verifier — separate VM reads the NFS workspace and runs go build/vet.
+			verifyStageID := stageID + "-verify"
+			freshWF, ok2 = e.store.Get(id)
+			if !ok2 {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("workflow %s not found before verify stage", id)
+				}
+				mu.Unlock()
+				return
+			}
+			freshWF.Stages = append(freshWF.Stages, Stage{
+				ID:     verifyStageID,
+				Kind:   KindVerify,
+				Status: StagePending,
+			})
+			_ = e.store.Upsert(freshWF)
+
+			verifyPrompt := VerifyPrompt(StageConfig{
+				Goal:             wf.Input,
+				RepoURL:          wf.RepoURL,
+				PreviousOutput:   taskDesc,
+				ImplementSession: implementSessionID,
+				VerifierPrompt:   wf.Config.VerifierPrompt,
+			})
+
+			verifyCtx, verifyCancel := context.WithTimeout(ctx, 10*time.Minute)
+			defer verifyCancel()
+			verifyRunErr := e.runStage(verifyCtx, id, verifyStageID, KindVerify, verifyPrompt)
+
+			// Record VerifySessionID on the implement stage regardless of outcome.
+			if freshWF2, ok3 := e.store.Get(id); ok3 {
+				vIdx := stageIndex(freshWF2, verifyStageID)
+				iIdx := stageIndex(freshWF2, stageID)
+				if vIdx >= 0 && iIdx >= 0 {
+					freshWF2.Stages[iIdx].VerifySessionID = freshWF2.Stages[vIdx].SessionID
+					_ = e.store.Upsert(freshWF2)
+				}
+			}
+
+			if verifyRunErr != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = verifyRunErr
+				}
+				mu.Unlock()
+				return
+			}
+
+			// Parse verifier JSON output.
+			freshWF, ok2 = e.store.Get(id)
+			if !ok2 {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("workflow %s not found after verify stage", id)
+				}
+				mu.Unlock()
+				return
+			}
+			vIdx := stageIndex(freshWF, verifyStageID)
+			var verifyOutput string
+			if vIdx >= 0 {
+				verifyOutput = freshWF.Stages[vIdx].Output
+			}
+
+			type verifyResult struct {
+				Pass   bool     `json:"pass"`
+				Issues []string `json:"issues"`
+			}
+			var vr verifyResult
+			if jsonErr := json.Unmarshal([]byte(verifyOutput), &vr); jsonErr != nil {
+				issueMsg := fmt.Sprintf("verifier output not parseable: %s", verifyOutput)
+				e.markStageFailed(id, stageID, fmt.Errorf("%s", issueMsg))
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("implement stage %s: %s", stageID, issueMsg)
+				}
+				mu.Unlock()
+				return
+			}
+
+			if !vr.Pass {
+				issueMsg := "verifier: " + strings.Join(vr.Issues, "; ")
+				e.markStageFailed(id, stageID, fmt.Errorf("%s", issueMsg))
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("implement stage %s: %s", stageID, issueMsg)
+				}
+				mu.Unlock()
+				return
+			}
+
+			// Implement + verify both passed.
+			mu.Lock()
+			succeededBranches = append(succeededBranches, branchName)
+			mu.Unlock()
 		}()
 	}
 	wg.Wait()
 
-	// Mark workflow terminal.
+	// ----- merge stage -----
+	mergeStageID := id + "-merge"
 	wf, ok = e.store.Get(id)
 	if !ok {
-		slog.Warn("workflow not found after implement fan-out", "workflow", id[:8])
+		slog.Warn("workflow not found before merge stage", "workflow", id[:8])
 		return
 	}
-	if firstErr != nil {
+	wf.Stages = append(wf.Stages, Stage{
+		ID:     mergeStageID,
+		Kind:   KindMerge,
+		Status: StageRunning,
+	})
+	if err := e.store.Upsert(wf); err != nil {
+		slog.Warn("workflow: persist merge stage", "workflow", id[:8], "err", err)
+	}
+
+	mergeCtx, mergeCancel := context.WithTimeout(ctx, 15*time.Minute)
+	defer mergeCancel()
+	_, _, mergeErr := e.mergeFn(mergeCtx, wf.RepoURL, wf.Branch, e.token, succeededBranches)
+
+	wf, ok = e.store.Get(id)
+	if !ok {
+		slog.Warn("workflow not found after merge", "workflow", id[:8])
+		return
+	}
+	idx := stageIndex(wf, mergeStageID)
+	if idx >= 0 {
+		if mergeErr != nil {
+			wf.Stages[idx].Status = StageFailed
+			wf.Stages[idx].Error = mergeErr.Error()
+		} else {
+			wf.Stages[idx].Status = StageDone
+		}
+	}
+
+	// Mark workflow terminal.
+	if firstErr != nil || mergeErr != nil {
 		wf.Status = StatusFailed
-		wf.Error = firstErr.Error()
+		if firstErr != nil {
+			wf.Error = firstErr.Error()
+		} else {
+			wf.Error = mergeErr.Error()
+		}
 	} else {
 		wf.Status = StatusDone
 	}

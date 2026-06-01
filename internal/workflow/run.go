@@ -28,16 +28,23 @@ const (
 	KindImplement StageKind = "implement"
 	KindReview    StageKind = "review"   // reserved for future use
 	KindVerify    StageKind = "verify"   // reserved for future use
+	KindMerge     StageKind = "merge"
 )
 
 type Stage struct {
-	ID        string
-	Kind      StageKind
-	SessionID string      // the VM session executing this stage (empty until started)
-	Status    StageStatus
-	Input     string      // prompt fed to this stage
-	Output    string      // captured stdout, available when StageDone
-	Error     string      // set when Status == StageFailed; reason for failure
+	ID              string
+	Kind            StageKind
+	SessionID       string      // the VM session executing this stage (empty until started)
+	Status          StageStatus
+	Input           string      // prompt fed to this stage
+	Output          string      // captured stdout, available when StageDone
+	Error           string      // set when Status == StageFailed; reason for failure
+	VerifySessionID string      // session ID of the verify VM for this implement stage
+}
+
+// WorkflowConfig holds optional per-workflow overrides. The zero value uses all defaults.
+type WorkflowConfig struct {
+	VerifierPrompt string // empty = use default premade verifier rubric; special harness fills this in
 }
 
 type Workflow struct {
@@ -48,6 +55,7 @@ type Workflow struct {
 	Status    Status
 	Stages    []Stage
 	Error     string
+	Config    WorkflowConfig
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
