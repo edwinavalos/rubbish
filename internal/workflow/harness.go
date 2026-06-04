@@ -6,7 +6,8 @@ import "strings"
 type StageConfig struct {
 	Goal             string
 	RepoURL          string
-	Branch           string
+	Branch           string // for implement: the implement branch name; for verify: same
+	BaseBranch       string // for implement: the branch to create the implement branch from
 	PreviousOutput   string // research output for plan; task description for implement
 	ImplementSession string // for verify stages: the implement session whose workspace to check
 	VerifierPrompt   string // empty = use default rubric; populated by special harness later
@@ -40,34 +41,46 @@ func PlanPrompt(c StageConfig) string {
 }
 
 // ImplementPrompt builds the prompt for an implement stage.
-// c.PreviousOutput is the task description; c.Branch is the implement branch name.
+// c.Branch is the implement branch name; c.BaseBranch is the branch to fork from.
 func ImplementPrompt(c StageConfig) string {
+	base := c.BaseBranch
+	if base == "" {
+		base = "main"
+	}
 	return "You are a coding agent. Complete ONLY the task described below. " +
 		"Do not refactor unrelated code.\n\n" +
 		"Task: " + c.PreviousOutput + "\n\n" +
-		"Repository: " + c.RepoURL + " (base branch: " + c.Branch + ")\n\n" +
-		"Create branch " + c.Branch + " from the base branch, implement the task, and push.\n\n" +
-		"Before committing, run `go build ./...` and `go vet ./...`. " +
-		"If either fails, fix the errors. Do not commit broken code.\n\n" +
+		"Repository: " + c.RepoURL + "\n\n" +
+		"Steps:\n" +
+		"1. Clone the repository and check out base branch `" + base + "`\n" +
+		"2. Create and check out branch `" + c.Branch + "` from `" + base + "`\n" +
+		"3. Implement the task\n" +
+		"4. Run `go build ./...` and `go vet ./...` — fix any errors before committing\n" +
+		"5. Commit your changes with a descriptive message\n" +
+		"6. Push branch `" + c.Branch + "` to origin\n\n" +
 		"End your output with this exact JSON block (fill in the values):\n" +
 		`{"committed": true|false, "commit_sha": "<sha or empty>", "build_ok": true|false, "notes": "<optional notes>"}`
 }
 
 // VerifyPrompt builds the prompt for a verify stage.
-// c.PreviousOutput is the original task description. c.ImplementSession is the
-// implement session whose workspace is mounted at /home/claude/workspace/.
+// c.Branch is the implement branch to fetch and check out.
+// c.PreviousOutput is the original task description.
 func VerifyPrompt(c StageConfig) string {
 	var sb strings.Builder
 	sb.WriteString("You are a code reviewer. You did NOT write this code.\n\n")
-	sb.WriteString("The implementation you are reviewing is at /home/claude/workspace/.\n\n")
+	sb.WriteString("The repository is cloned at /home/claude/workspace/.\n")
+	if c.Branch != "" {
+		sb.WriteString("First, fetch and check out the implement branch:\n")
+		sb.WriteString("  cd /home/claude/workspace && git fetch origin " + c.Branch + " && git checkout " + c.Branch + "\n\n")
+	}
 	sb.WriteString("Task that was supposed to be implemented:\n")
 	sb.WriteString(c.PreviousOutput)
 	sb.WriteString("\n\nVerification steps:\n")
-	sb.WriteString("1. Run `go build ./...` — must succeed with no errors\n")
+	sb.WriteString("1. Run `go build ./...` from /home/claude/workspace — must succeed with no errors\n")
 	sb.WriteString("2. Run `go vet ./...` — must produce no warnings\n")
 	sb.WriteString("3. Confirm the task described above was actually completed as specified\n")
 	sb.WriteString("4. Confirm no unrelated files were changed\n")
-	sb.WriteString("5. Confirm a commit is present (`git log --oneline -1`)\n\n")
+	sb.WriteString("5. Confirm a new commit is present on this branch (`git log --oneline -3`)\n\n")
 
 	if c.VerifierPrompt != "" {
 		sb.WriteString("Additional criteria:\n")
@@ -75,8 +88,12 @@ func VerifyPrompt(c StageConfig) string {
 		sb.WriteString("\n\n")
 	}
 
-	sb.WriteString("Respond with ONLY this JSON object (no other text):\n")
+	sb.WriteString("Your entire response MUST be exactly this JSON object and nothing else — no prose, no markdown, no explanation before or after:\n")
 	sb.WriteString(`{"pass": true|false, "issues": ["<issue 1>", "<issue 2>"]}`)
-	sb.WriteString("\n\nIf pass is true, issues must be an empty array.")
+	sb.WriteString("\n\nRules:\n")
+	sb.WriteString("- Output the JSON object as your first and only content.\n")
+	sb.WriteString("- If pass is true, issues MUST be an empty array [].\n")
+	sb.WriteString("- Do not wrap the JSON in a code block or add any surrounding text.\n")
+	sb.WriteString("- MACHINE-READABLE OUTPUT ONLY.")
 	return sb.String()
 }

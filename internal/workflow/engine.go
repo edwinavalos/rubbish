@@ -230,6 +230,7 @@ func (e *Engine) run(ctx context.Context, id string) {
 				Goal:           wf.Input,
 				RepoURL:        wf.RepoURL,
 				Branch:         branchName,
+				BaseBranch:     wf.Branch,
 				PreviousOutput: taskDesc,
 			})
 
@@ -298,14 +299,13 @@ func (e *Engine) run(ctx context.Context, id string) {
 			verifyPrompt := VerifyPrompt(StageConfig{
 				Goal:             wf.Input,
 				RepoURL:          wf.RepoURL,
+				Branch:           branchName,
 				PreviousOutput:   taskDesc,
 				ImplementSession: implementSessionID,
 				VerifierPrompt:   wf.Config.VerifierPrompt,
 			})
 
-			verifyCtx, verifyCancel := context.WithTimeout(ctx, 10*time.Minute)
-			defer verifyCancel()
-			verifyRunErr := e.runStage(verifyCtx, id, verifyStageID, KindVerify, verifyPrompt)
+			verifyRunErr := e.runStage(ctx, id, verifyStageID, KindVerify, verifyPrompt)
 
 			// Record VerifySessionID on the implement stage regardless of outcome.
 			if freshWF2, ok3 := e.store.Get(id); ok3 {
@@ -347,7 +347,7 @@ func (e *Engine) run(ctx context.Context, id string) {
 				Issues []string `json:"issues"`
 			}
 			var vr verifyResult
-			if jsonErr := json.Unmarshal([]byte(verifyOutput), &vr); jsonErr != nil {
+			if jsonErr := json.Unmarshal([]byte(ExtractVerifyBlock(verifyOutput)), &vr); jsonErr != nil {
 				issueMsg := fmt.Sprintf("verifier output not parseable: %s", verifyOutput)
 				e.markStageFailed(id, stageID, fmt.Errorf("%s", issueMsg))
 				mu.Lock()

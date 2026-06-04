@@ -633,7 +633,46 @@ func (m *SessionManager) boot(ctx context.Context, sess *Session, githubToken st
 		}
 
 		// Parse the JSON result from stdout; fall back to raw text for compatibility.
-		result, _ := parseClaudeJSON(stdout)
+		result, isError := parseClaudeJSON(stdout)
+
+		// Treat a claude-reported error or an empty result from a non-zero exit as
+		// a session failure so callers receive a real error rather than blank output.
+		if isError || (result == "" && cmdErr != nil) {
+			errMsg := stderr
+			if errMsg == "" {
+				errMsg = "claude exited with no output"
+			}
+			slog.Warn("session: claude reported error", "session", sid, "err", errMsg)
+			m.mu.Lock()
+			sess.Error = errMsg
+			m.mu.Unlock()
+			if err := sess.sm.Transition(session.StateFailed); err != nil {
+				// Already in a terminal state (e.g. stop_session ran cleanup while
+				// claude was executing). Do not re-run cleanup — it would tear down
+				// tap/slot resources that may already belong to a new session.
+				slog.Warn("session: claude error but already terminal, skipping cleanup", "session", sid, "err", err)
+				return
+			}
+			m.persistSession(sess)
+			sess.cancel()
+			if sess.v != nil {
+				stopCtx, stopCancel := context.WithTimeout(context.Background(), 8*time.Second)
+				if err := sess.v.Stop(stopCtx); err != nil {
+					slog.Warn("session: stop vm after error", "session", sid, "err", err)
+				}
+				stopCancel()
+				vm.WaitForVMDead(vm.SlotIP(sess.Slot))
+			}
+			m.snap.DeleteSnapshot(sess.ID) //nolint:errcheck
+			m.freeSlot(sess.Slot)
+			m.mu.Lock()
+			delete(m.sessions, sess.ID)
+			m.mu.Unlock()
+			if m.repoCache != nil {
+				m.repoCache.CleanupWorkspace(sess.ID)
+			}
+			return
+		}
 
 		m.mu.Lock()
 		sess.Result = result
@@ -1561,7 +1600,7 @@ func main() {
 
 	mgr.serverCtx = ctx
 
-	engine := workflow.NewEngine(ctx, wfStore, mgr, 3)
+	engine := workflow.NewEngine(ctx, wfStore, mgr, 3, loadSavedToken(credPath))
 	engine.RecoverInProgress(ctx) //nolint:errcheck
 
 	mux := http.NewServeMux()

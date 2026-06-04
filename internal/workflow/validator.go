@@ -4,9 +4,23 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 var terminalBlockRe = regexp.MustCompile(`(?s)\{[^{}]*"committed"[^{}]*\}`)
+var verifyBlockRe = regexp.MustCompile(`(?s)\{[^{}]*"pass"[^{}]*\}`)
+
+// ExtractVerifyBlock pulls the first {"pass":...} JSON object out of s,
+// tolerating surrounding prose. Returns s unchanged if no match is found so
+// the caller's json.Unmarshal produces the expected error.
+func ExtractVerifyBlock(s string) string {
+	s = strings.TrimSpace(s)
+	loc := verifyBlockRe.FindStringIndex(s)
+	if loc == nil {
+		return s
+	}
+	return s[loc[0]:loc[1]]
+}
 
 type terminalBlock struct {
 	Committed bool   `json:"committed"`
