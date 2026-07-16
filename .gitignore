@@ -13,3 +13,9 @@
 
 # Claude Code agent worktrees (ephemeral, not source)
 /.claude/
+
+# Personal ops notes / host-specific runbooks (kept in Claude memory only)
+/CHECKPOINT.md
+/ROOTFS_BUILD_NOTES.md
+/SNAPSHOT_MANAGER_NOTES.md
+/.mcp.json

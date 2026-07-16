@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Mount the base rootfs image and run sanity checks inside a chroot.
-# Must be run as root on the test box (192.168.1.35).
+# Must be run as root on the test box (192.168.1.152).
 # Usage:
 #   ./scripts/test-image.sh              # sanity check only
 #   ./scripts/test-image.sh fix          # also run claude postinstall

@@ -1200,7 +1200,7 @@ func seedDevFiles(bridge setupRunner, hostIP string) error {
 		return fmt.Errorf("chmod deploy key: %w", err)
 	}
 
-	// SSH config so `ssh 192.168.1.35` uses the deploy key as claude.
+	// SSH config so `ssh 192.168.1.152` uses the deploy key as claude.
 	// base64-injected to avoid shell quoting issues with embedded newlines.
 	sshConfig := fmt.Sprintf("Host %s\n  User claude\n  IdentityFile %s/id_deploy\n  StrictHostKeyChecking yes\n", hostIP, vmSSHDir)
 	sshConfigB64 := base64.StdEncoding.EncodeToString([]byte(sshConfig))
@@ -1548,7 +1548,7 @@ func registerHandlers(mux *http.ServeMux, mgr *SessionManager, engine *workflow.
 func main() {
 	keyFlag := flag.String("key", "", "path to SSH private key for VM access")
 	slotsFlag := flag.Int("slots", 4, "max concurrent VM sessions (0 = unlimited)")
-	devHostIPFlag := flag.String("dev-host-ip", "192.168.1.35", "host IP for NFS mounts in dev-mode sessions")
+	devHostIPFlag := flag.String("dev-host-ip", "192.168.1.152", "host IP for NFS mounts in dev-mode sessions")
 	flag.Parse()
 
 	if *keyFlag == "" {
