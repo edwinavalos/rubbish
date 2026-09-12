@@ -1,0 +1,27 @@
+Security audit and harden two modules: cmd/poc/main.go (HTTP handlers)
+and internal/mcp/tools.go (MCP tool handlers).
+
+Focus areas:
+1. HTTP request body size limits — add http.MaxBytesReader to all POST
+   handlers that read a body, to prevent unbounded memory consumption.
+
+2. Input validation on repo_url and branch fields — reject obviously
+   malformed values (e.g. branch names containing shell metacharacters
+   like ; & | $ ` ) before they reach CreateSession. Return a clear
+   400 error to the caller.
+
+3. Error response hygiene — ensure 500 responses do not include internal
+   file paths or raw Go error strings in the response body. Wrap internal
+   errors before writing them to the HTTP response.
+
+Constraints:
+- Do not change any public API shapes or MCP tool schemas.
+- Do not modify any test files.
+- Each task must name the specific files and functions it touches.
+- Run `go build ./...` and `go vet ./...` before committing. Fix any
+  errors — do not commit broken code.
+- End your output with this exact JSON block (fill in the values):
+  {"committed": true, "commit_sha": "<sha>", "build_ok": true, "notes": "<optional notes>"}
+
+Repository: https://github.com/edwinavalos/rubbish.git
+Branch: main

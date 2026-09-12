@@ -18,6 +18,7 @@ import (
 	"github.com/edwinavalos/rubbish/internal/gitutil"
 	"github.com/edwinavalos/rubbish/internal/session"
 	"github.com/edwinavalos/rubbish/internal/sessionstore"
+	"github.com/edwinavalos/rubbish/internal/sessionstore/pgstore"
 	"github.com/edwinavalos/rubbish/internal/terminal"
 	"github.com/edwinavalos/rubbish/internal/vm"
 	"github.com/gorilla/websocket"
@@ -66,7 +67,8 @@ func (h *connHub) notifyReconnect() {
 
 func main() {
 	keyPath := flag.String("key", "", "path to SSH private key for VM access")
-	dbPath := flag.String("db", "/opt/rubbish/sessions.db", "path to sessions SQLite database")
+	dbPath := flag.String("db", "/opt/rubbish/sessions.db", "path to sessions JSON store (used when --postgres-dsn is unset)")
+	postgresDSN := flag.String("postgres-dsn", os.Getenv("RUBBISH_POSTGRES_DSN"), "Postgres DSN for the sessions store (defaults to RUBBISH_POSTGRES_DSN env var; empty falls back to the JSON store at --db)")
 	addr := flag.String("addr", ":8081", "listen address")
 	flag.Parse()
 
@@ -83,9 +85,19 @@ func main() {
 		slog.Error("parse SSH key", "err", err); os.Exit(1)
 	}
 
-	store, err := sessionstore.Open(*dbPath)
-	if err != nil {
-		slog.Error("open session DB", "err", err); os.Exit(1)
+	var store sessionstore.Store
+	if *postgresDSN != "" {
+		pgStore, err := pgstore.Open(*postgresDSN)
+		if err != nil {
+			slog.Error("open postgres session store", "err", err); os.Exit(1)
+		}
+		store = pgStore
+	} else {
+		jsonStore, err := sessionstore.Open(*dbPath)
+		if err != nil {
+			slog.Error("open json session store", "err", err); os.Exit(1)
+		}
+		store = jsonStore
 	}
 	defer store.Close()
 

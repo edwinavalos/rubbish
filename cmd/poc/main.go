@@ -27,6 +27,7 @@ import (
 	"github.com/edwinavalos/rubbish/internal/profile"
 	"github.com/edwinavalos/rubbish/internal/session"
 	"github.com/edwinavalos/rubbish/internal/sessionstore"
+	"github.com/edwinavalos/rubbish/internal/sessionstore/pgstore"
 	"github.com/edwinavalos/rubbish/internal/terminal"
 	"github.com/edwinavalos/rubbish/internal/vm"
 	"github.com/edwinavalos/rubbish/internal/workflow"
@@ -193,13 +194,13 @@ type SessionManager struct {
 	signer     ssh.Signer
 	credPath   string
 	prof       *profile.Store
-	store      *sessionstore.Store
+	store      sessionstore.Store
 	devHostIP  string // host IP used for NFS mounts in dev-mode sessions
 	repoCache  *gitutil.RepoCache
 	serverCtx  context.Context // lifetime context for background goroutines (boot, etc.)
 }
 
-func NewSessionManager(snapMgr *fc.SnapshotManager, signer ssh.Signer, credPath string, prof *profile.Store, store *sessionstore.Store, maxSlots int, devHostIP string) *SessionManager {
+func NewSessionManager(snapMgr *fc.SnapshotManager, signer ssh.Signer, credPath string, prof *profile.Store, store sessionstore.Store, maxSlots int, devHostIP string) *SessionManager {
 	return newSessionManager(
 		&realSnapshotter{snapMgr},
 		realVMLauncher{},
@@ -214,7 +215,7 @@ func NewSessionManager(snapMgr *fc.SnapshotManager, signer ssh.Signer, credPath 
 	)
 }
 
-func newSessionManager(snap snapshotter, launcher vmLauncher, bridges bridgeFactory, signer ssh.Signer, credPath string, prof *profile.Store, store *sessionstore.Store, maxSlots int, devHostIP string, repoCache *gitutil.RepoCache) *SessionManager {
+func newSessionManager(snap snapshotter, launcher vmLauncher, bridges bridgeFactory, signer ssh.Signer, credPath string, prof *profile.Store, store sessionstore.Store, maxSlots int, devHostIP string, repoCache *gitutil.RepoCache) *SessionManager {
 	return &SessionManager{
 		sessions:  make(map[string]*Session),
 		usedSlots: make(map[int]bool),
@@ -1549,6 +1550,8 @@ func main() {
 	keyFlag := flag.String("key", "", "path to SSH private key for VM access")
 	slotsFlag := flag.Int("slots", 4, "max concurrent VM sessions (0 = unlimited)")
 	devHostIPFlag := flag.String("dev-host-ip", "192.168.1.152", "host IP for NFS mounts in dev-mode sessions")
+	dbPathFlag := flag.String("db", "/opt/rubbish/sessions.db", "path to sessions JSON store (used when --postgres-dsn is unset)")
+	postgresDSNFlag := flag.String("postgres-dsn", os.Getenv("RUBBISH_POSTGRES_DSN"), "Postgres DSN for the sessions store (defaults to RUBBISH_POSTGRES_DSN env var; empty falls back to the JSON store at --db)")
 	flag.Parse()
 
 	if *keyFlag == "" {
@@ -1578,9 +1581,21 @@ func main() {
 		slog.Error("create creds dir", "err", err); os.Exit(1)
 	}
 
-	store, err := sessionstore.Open("/opt/rubbish/sessions.db")
-	if err != nil {
-		slog.Error("open session store", "err", err); os.Exit(1)
+	var store sessionstore.Store
+	if *postgresDSNFlag != "" {
+		pgStore, err := pgstore.Open(*postgresDSNFlag)
+		if err != nil {
+			slog.Error("open postgres session store", "err", err); os.Exit(1)
+		}
+		store = pgStore
+		slog.Info("session store: postgres")
+	} else {
+		jsonStore, err := sessionstore.Open(*dbPathFlag)
+		if err != nil {
+			slog.Error("open json session store", "err", err); os.Exit(1)
+		}
+		store = jsonStore
+		slog.Info("session store: json", "path", *dbPathFlag)
 	}
 	defer store.Close()
 
